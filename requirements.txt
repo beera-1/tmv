@@ -1,0 +1,8 @@
+git+https://github.com/Sumnebaroo/pyrogram.git
+TgCrypto
+shortzy
+aiohttp
+beautifulsoup4
+motor
+requests
+cloudscraper
