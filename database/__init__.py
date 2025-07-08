@@ -72,7 +72,7 @@ async def send_new_link_notification(links):
             return
 
         for link in links:
-            local_filename = f"downloads/@MOVIES_ADDDDA {link['name']}.torrent"
+            local_filename = f"downloads/@ADDAFILES {link['name']}.torrent"
 
             if await is_valid_link(link["link"]):
                 if await download_file(link["link"], local_filename):
@@ -82,9 +82,9 @@ async def send_new_link_notification(links):
                             document=local_filename,
                             thumb="database/thumb.jpg",
                             caption=f"""
-<b>@MOVIES_ADDDDA {link['name']}
+<b>@ADDAFILES {link['name']}
 
-<blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>""",
+<blockquote>〽️ Powered by @ADDAFILES</blockquote></b>""",
                         )
 
                         await User.send_message(
@@ -98,9 +98,9 @@ async def send_new_link_notification(links):
                             document=local_filename,
                             thumb="database/thumb.jpg",
                             caption=f"""
-<b>@MOVIES_ADDDDA {link['name']}
+<b>@ADDAFILES {link['name']}
 
-<blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>""",
+<blockquote>〽️ Powered by @ADDAFILES</blockquote></b>""",
                         )
                     except Exception as e:
                         logging.error(
