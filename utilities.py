@@ -1,5 +1,4 @@
 import asyncio, logging, aiohttp
-import cloudscraper  # Import CloudScraper
 from bs4 import BeautifulSoup
 import re
 from datetime import datetime
@@ -10,24 +9,26 @@ from pyrogram import enums, Client
 import traceback
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from pyrogram.errors.exceptions.bad_request_400 import UserNotParticipant
+from pyrogram.enums import ChatMemberStatus
 from urllib.parse import urlparse
+from pyrogram import filters
 
 message_lock = asyncio.Lock()
 
+
 executor = ThreadPoolExecutor()
 
-async def fetch(url):
-    scraper = cloudscraper.create_scraper()  # Create a scraper instance to bypass Cloudflare protection
 
+async def fetch(url):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
     }
 
     loop = asyncio.get_event_loop()
     try:
-        # Pass the scraper.get function with arguments to run_in_executor
-        response = await loop.run_in_executor(executor, lambda: scraper.get(url, headers=headers))
-        response.raise_for_status()  # Raise an error for HTTP errors (4xx, 5xx)
+        response = await loop.run_in_executor(executor, requests.get, url, headers)
+        response.raise_for_status()
         return response.text
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching {url}: {str(e)}")
@@ -251,4 +252,4 @@ async def stop_user():
     await User.send_message(GROUP_ID, "User Session Stopped")
     await User.stop()
     logging.info("User Session Stopped.")
-                
+    
