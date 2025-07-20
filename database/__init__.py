@@ -6,6 +6,7 @@ import logging
 import re
 from pyrogram import Client
 import requests
+import logging
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
@@ -13,29 +14,31 @@ from urllib.parse import urlparse
 executor = ThreadPoolExecutor()
 os.makedirs("downloads", exist_ok=True)
 
-User = Client("User", session_string=USER_SESSION_STRING, api_hash=API_HASH, api_id=API_ID)
+User = Client(
+    "User", session_string=USER_SESSION_STRING, api_hash=API_HASH, api_id=API_ID
+)
+
 
 async def fetch(url):
-    scraper = cloudscraper.create_scraper()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
+    }
+
     loop = asyncio.get_event_loop()
     try:
-        response = await loop.run_in_executor(None, lambda: scraper.get(url))
+        response = await loop.run_in_executor(executor, requests.get, url, headers)
         response.raise_for_status()
-        size = int(response.headers.get("Content-Length", 0))
-        return response, size
-    except Exception as e:  # Indentation fixed here
-        logging.error(f"Unexpected error: {str(e)}", exc_info=True)
-        return None, 0  # Ensure a tuple is always returned
+        return response, int(response.headers.get("Content-Length", 0))
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error downloading {url}: {str(e)}")
+        return None, 0
+
 
 async def is_valid_link(url):
-    response, _ = await fetch(url)  # Unpacking the tuple correctly
+    response, _ = await fetch(url)
+    return response is not None and response.status_code == 200
 
-    if response is None:  # If fetch failed, return False
-        return False
 
-    return response.status_code == 200  # Safely check status code
-    return False
-    
 async def download_file(url, local_filename):
     max_retries = 5
     for attempt in range(max_retries):
@@ -50,15 +53,21 @@ async def download_file(url, local_filename):
                     logging.info(f"Downloaded {local_filename} successfully.")
                     return True
                 else:
-                    logging.error(f"File size mismatch for {url}. Retrying...")
+                    logging.error(
+                        f"Downloaded file size does not match expected size for {url}. Attempt {attempt + 1}/{max_retries}."
+                    )
                     os.remove(local_filename)
             else:
-                logging.error(f"Failed to fetch {url}. Attempt {attempt + 1}/{max_retries}.")
+                logging.error(
+                    f"Failed to fetch {url}. Attempt {attempt + 1}/{max_retries}."
+                )
 
         except Exception as e:
-            logging.error(f"Download failed from {url}: {e}. Retrying...")
+            logging.error(
+                f"Failed to download file from {url}: {e}. Attempt {attempt + 1}/{max_retries}."
+            )
 
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
     logging.error(f"Failed to download file from {url} after {max_retries} attempts.")
     return False
@@ -88,7 +97,7 @@ async def send_new_link_notification(links):
 
                         await User.send_message(
                             chat_id=GROUP_ID,
-                            text="/qbleech1",
+                            text="/qbleech",
                             reply_to_message_id=sent_msg.id,
                         )
 
