@@ -9,7 +9,6 @@ import requests
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
-import cloudscraper
 
 executor = ThreadPoolExecutor()
 os.makedirs("downloads", exist_ok=True)
