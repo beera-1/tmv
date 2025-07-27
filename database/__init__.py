@@ -18,15 +18,22 @@ User = Client(
     "User", session_string=USER_SESSION_STRING, api_hash=API_HASH, api_id=API_ID
 )
 
-
+# ✅ Cloudflare clearance token support added here
 async def fetch(url):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
     }
 
+    cookies = {
+        "cf_clearance": "C1WrmXbOfZwMaTQl2eVHjeDI3iSQ7Z9TjHe1fCjS1.0-1753590456-1.2.1.1-Jfbf0OpQcZEx9T_pa66YhGRlUr5gJs1MAi4kSiEnyMnrYbD9jKyd.zqR0N470h4u6b1DY.no4v3vqWjLWYFMuI9JYbff2sRHchoJttc.c_Kf.t2sbeS18pAj7J9Qk5lzEKPbgO3VOO3wefCh.3mYZhfnWcdqsrgV2xDKK4KWP52Nl7dbZQPZenZrrghddd8hLqfEppM.rlWztieXH8yjQuFudWjJn_ODzUCmVqJE9a8"  # 🔥 Replace this with real token from browser
+    }
+
     loop = asyncio.get_event_loop()
     try:
-        response = await loop.run_in_executor(executor, requests.get, url, headers)
+        response = await loop.run_in_executor(
+            executor,
+            lambda: requests.get(url, headers=headers, cookies=cookies, timeout=15)
+        )
         response.raise_for_status()
         return response, int(response.headers.get("Content-Length", 0))
     except requests.exceptions.RequestException as e:
