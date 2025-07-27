@@ -25,7 +25,7 @@ async def fetch(url):
     }
 
     cookies = {
-        "cf_clearance": "C1WrmXbOfZwMaTQl2eVHjeDI3iSQ7Z9TjHe1fCjS1.0-1753590456-1.2.1.1-Jfbf0OpQcZEx9T_pa66YhGRlUr5gJs1MAi4kSiEnyMnrYbD9jKyd.zqR0N470h4u6b1DY.no4v3vqWjLWYFMuI9JYbff2sRHchoJttc.c_Kf.t2sbeS18pAj7J9Qk5lzEKPbgO3VOO3wefCh.3mYZhfnWcdqsrgV2xDKK4KWP52Nl7dbZQPZenZrrghddd8hLqfEppM.rlWztieXH8yjQuFudWjJn_ODzUCmVqJE9a8"  # 🔥 Replace this with real token from browser
+        "cf_clearance": "V9Mpg22Ufg7MeAoBjouHC1YRWsX3U.bKpGh.PsIbmL0-1753597679-1.2.1.1-m58.Xbq16cbYxFaPPj6yI8JMeRTFvUN_YkO0jDJDpssVMy3yKOG.QBck_V7nkkvQ84wwOIUSa4GXTocvgSgzVaoHAy0NLFk6I2l.r.qrCBV9pFJX.gO7DYudWZjGBst0pB3UXllqAcBvlU0NL_JaujceTXvjARiUPsoM4wIuIa28djkD3Tax6fO58iOf_xG7rTTUIgFRXmhCbNoNmbL_7jRQK8CZFrHE3bktGsr7qTQ"  # 🔥 Replace this with real token from browser
     }
 
     loop = asyncio.get_event_loop()
