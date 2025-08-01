@@ -14,6 +14,7 @@ from pyrogram import Client
 
 # Setup Cloudscraper for Cloudflare protection bypass
 scraper = cloudscraper.create_scraper(
+    delay=10,
     browser={"browser": "chrome", "platform": "windows", "mobile": False}
 )
 
@@ -25,7 +26,7 @@ def get_full_url(url: str) -> str:
 async def fetch(url):
     loop = asyncio.get_event_loop()
     try:
-        response = await loop.run_in_executor(None, lambda: scraper.get(url))
+        response = await loop.run_in_executor(None, lambda: scraper.get(url, timeout=15))
         response.raise_for_status()
         return response.text
     except Exception as e:
