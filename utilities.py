@@ -3,20 +3,25 @@ import logging
 import re
 import traceback
 from datetime import datetime
+from urllib.parse import urljoin
 
-from aiohttp import web
+import cloudscraper
+from aiohttp import web, ClientSession, ClientTimeout
 from bs4 import BeautifulSoup
 from database import db
 from configs import *
 from pyrogram import Client
-import cloudscraper
 
-# Cloudscraper for Cloudflare bypass
+# Setup Cloudscraper for Cloudflare protection bypass
 scraper = cloudscraper.create_scraper(
     browser={"browser": "chrome", "platform": "windows", "mobile": False}
 )
 
-# Async fetch using cloudscraper in thread
+# Safe URL join
+def get_full_url(url: str) -> str:
+    return url if url.startswith("http") else urljoin(BASE_URL, url)
+
+# Async fetch using threads for blocking HTTP
 async def fetch(url):
     loop = asyncio.get_event_loop()
     try:
@@ -27,34 +32,29 @@ async def fetch(url):
         logging.error(f"Error fetching {url}: {str(e)}")
         return None
 
-
 def get_size_in_bytes(size_str):
     size_str = size_str.lower()
     size_match = re.search(r"([\d.]+)\s*(gb|mb)", size_str)
     if size_match:
         size_value = float(size_match.group(1))
-        size_unit = size_match.group(2)
-        if size_unit == "gb":
-            return size_value * 1024 * 1024 * 1024
-        elif size_unit == "mb":
-            return size_value * 1024 * 1024
+        unit = size_match.group(2)
+        return size_value * (1024 ** 3 if unit == "gb" else 1024 ** 2)
     return None
-
 
 async def parse_links(html):
     soup = BeautifulSoup(html, "html.parser")
     links = []
     for link in soup.find_all("a", href=True):
-        if "/index.php?/forums/topic/" in link["href"]:
-            if link["href"] not in links:
-                links.append(link["href"])
-            if len(links) == 20:
-                break
+        href = link["href"]
+        if "/index.php?/forums/topic/" in href and href not in links:
+            links.append(href)
+        if len(links) == 20:
+            break
     return links
 
-
 async def fetch_attachments(page_url):
-    html = await fetch(page_url)
+    full_url = get_full_url(page_url)
+    html = await fetch(full_url)
     if not html:
         return None
 
@@ -65,69 +65,53 @@ async def fetch_attachments(page_url):
     domain_removal_regex = re.compile(r"(?:www\.)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
     mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$")
 
-    links = []
-
     content_div = soup.find("div", class_="cPost_contentWrap")
-    img_url = None
-    if content_div:
-        img_tag = content_div.find("img")
-        if img_tag and img_tag.get("src"):
-            img_url = img_tag["src"]
+    img_url = content_div.find("img")["src"] if content_div and content_div.find("img") else None
 
-    highest_episode_number = 0
-    highest_episode_links = []
-    season_based_links = []
-    highest_season = 0
+    links, season_based_links, highest_episode_links = [], [], []
+    highest_episode_number = highest_season = 0
     highest_episode_range = (0, 0)
 
     for link in soup.find_all("a", href=True):
-        if "attachment.php" in link["href"]:
-            size_tag = link.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
-            size_in_bytes = get_size_in_bytes(size_tag.text) if size_tag else None
+        if "attachment.php" not in link["href"]:
+            continue
 
-            link_text = link.get_text(strip=True) or ""
-            clean_link_text = domain_removal_regex.sub("", link_text)
-            clean_link_text = mkv_torrent_removal_regex.sub("", clean_link_text).strip()
+        size_tag = link.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
+        size_in_bytes = get_size_in_bytes(size_tag.text) if size_tag else None
 
-            season_match = non_episode_regex.search(link_text)
-            if season_match:
-                season_number = int(season_match.group(1))
-                episode_range = season_match.group(2)
+        link_text = link.get_text(strip=True)
+        clean_text = mkv_torrent_removal_regex.sub("", domain_removal_regex.sub("", link_text)).strip()
 
-                if "-" in episode_range:
-                    episode_start, episode_end = map(int, episode_range.split("-"))
-                else:
-                    episode_start = episode_end = int(episode_range)
+        # Season-based match
+        season_match = non_episode_regex.search(link_text)
+        if season_match:
+            season_number = int(season_match.group(1))
+            ep_range = season_match.group(2)
+            episode_start, episode_end = map(int, ep_range.split("-")) if "-" in ep_range else (int(ep_range), int(ep_range))
 
-                if season_number > highest_season or (
-                    season_number == highest_season and episode_end > highest_episode_range[1]
-                ):
-                    highest_season = season_number
-                    highest_episode_range = (episode_start, episode_end)
-                    season_based_links = [{"name": clean_link_text, "link": link["href"]}]
-                elif (
-                    season_number == highest_season
-                    and episode_start <= highest_episode_range[1]
-                ):
-                    season_based_links.append({"name": clean_link_text, "link": link["href"]})
+            if season_number > highest_season or (
+                season_number == highest_season and episode_end > highest_episode_range[1]
+            ):
+                highest_season = season_number
+                highest_episode_range = (episode_start, episode_end)
+                season_based_links = [{"name": clean_text, "link": get_full_url(link["href"])}]
+            elif season_number == highest_season and episode_start <= highest_episode_range[1]:
+                season_based_links.append({"name": clean_text, "link": get_full_url(link["href"])})
 
-            episode_matches = episode_pattern.findall(link_text)
-            if episode_matches and size_in_bytes is not None:
-                current_episode_number = max(int(ep) for ep in episode_matches)
-                if size_in_bytes < 4 * 1024 * 1024 * 1024:
-                    if current_episode_number > highest_episode_number:
-                        highest_episode_number = current_episode_number
-                        highest_episode_links = [{"name": clean_link_text, "link": link["href"]}]
-                    elif current_episode_number == highest_episode_number:
-                        highest_episode_links.append({"name": clean_link_text, "link": link["href"]})
-            elif size_in_bytes is not None and size_in_bytes < 4 * 1024 * 1024 * 1024:
-                links.append({"name": clean_link_text, "link": link["href"]})
+        # Episode match
+        episode_matches = episode_pattern.findall(link_text)
+        if episode_matches and size_in_bytes and size_in_bytes < 4 * 1024**3:
+            ep_num = max(int(ep) for ep in episode_matches)
+            if ep_num > highest_episode_number:
+                highest_episode_number = ep_num
+                highest_episode_links = [{"name": clean_text, "link": get_full_url(link["href"])}]
+            elif ep_num == highest_episode_number:
+                highest_episode_links.append({"name": clean_text, "link": get_full_url(link["href"])})
 
-    final_links = (
-        season_based_links
-        if season_based_links
-        else (highest_episode_links if highest_episode_links else links)
-    )
+        elif size_in_bytes and size_in_bytes < 4 * 1024**3:
+            links.append({"name": clean_text, "link": get_full_url(link["href"])})
+
+    final_links = season_based_links or highest_episode_links or links
 
     document = {
         "img_url": img_url,
@@ -138,32 +122,27 @@ async def fetch_attachments(page_url):
     await db.add_document(document)
     return document
 
-
 async def start_processing():
-    main_page_html = await fetch(BASE_URL)
-
-    if main_page_html:
-        fetched_links = await parse_links(main_page_html)
-        for li_link in fetched_links:
-            full_url = BASE_URL.rstrip("/") + "/" + li_link.lstrip("/")
-            logging.info(f"Fetching attachments from {full_url}")
-            await fetch_attachments(full_url)
-    else:
+    html = await fetch(BASE_URL)
+    if not html:
         logging.warning("No content found on the main page!")
+        return
 
+    topic_links = await parse_links(html)
+    for li_link in topic_links:
+        logging.info(f"Processing: {li_link}")
+        await fetch_attachments(li_link)
 
 routes = web.RouteTableDef()
 
 @routes.get("/", allow_head=True)
-async def root_route_handler(request):
+async def root_handler(request):
     return web.json_response({"status": "MadxBotz is live"})
 
-
 async def web_server():
-    web_app = web.Application(client_max_size=30000000)
-    web_app.add_routes(routes)
-    return web_app
-
+    app = web.Application(client_max_size=30000000)
+    app.add_routes(routes)
+    return app
 
 User = Client(
     "User",
@@ -172,15 +151,13 @@ User = Client(
     api_hash=API_HASH
 )
 
-
 async def ping_server():
     while True:
         try:
             await start_processing()
         except Exception as e:
-            logging.error(f"Unexpected error: {str(e)}")
+            logging.error(f"Processing error: {e}")
         await asyncio.sleep(60)
-
 
 async def ping_main_server():
     try:
@@ -188,19 +165,17 @@ async def ping_main_server():
         logging.info("User Session started.")
         await User.send_message(GROUP_ID, "User Session Started")
     except Exception as e:
-        logging.error(f"Error Starting User: {str(e)}")
+        logging.error(f"Failed to start User session: {e}")
 
     while True:
         await asyncio.sleep(250)
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with ClientSession(timeout=ClientTimeout(total=10)) as session:
                 async with session.get(SERVER_URL) as resp:
-                    logging.info(f"Pinged server with response: {resp.status}")
-        except TimeoutError:
-            logging.warning("Couldn't connect to the site URL.")
+                    logging.info(f"Ping response: {resp.status}")
         except Exception:
+            logging.warning("Ping failed.")
             traceback.print_exc()
-
 
 async def stop_user():
     await User.send_message(GROUP_ID, "User Session Stopped")
