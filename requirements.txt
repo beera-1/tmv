@@ -5,3 +5,4 @@ aiohttp
 beautifulsoup4
 motor
 requests
+cloudscraper==1.2.71
