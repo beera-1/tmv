@@ -1,8 +1,8 @@
-pyrofork
-TgCrypto
-shortzy
+cloudscraper
 aiohttp
 beautifulsoup4
+pyrogram
+TgCrypto
 motor
 requests
-cloudscraper==1.2.71
+shortzy
