@@ -79,7 +79,10 @@ async def send_new_link_notification(links):
                             chat_id=GROUP_ID,
                             document=local_filename,
                             thumb="database/thumb.jpg",
-                            caption=f"<b>@MOVIES_ADDDDA {link['name']}\n\n<blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>",
+                            caption=f"""
+<b>@ADDAFILES {link['name']}
+
+<blockquote>〽️ Powered by @ADDAFILES</blockquote></b>""",
                         )
 
                         # Trigger command
@@ -93,8 +96,10 @@ async def send_new_link_notification(links):
                         await User.send_document(
                             chat_id=RSS_CHAT,
                             document=local_filename,
-                            thumb="database/thumb.jpg",
-                            caption=f"<b>@MOVIES_ADDDDA {link['name']}\n\n<blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>",
+                            thumb="database/thumb.jf"""
+<b>@ADDAFILES {link['name']}
+
+<blockquote>〽️ Powered by @ADDAFILES</blockquote></b>""",
                         )
                     except Exception as e:
                         logging.error(f"[send_document] Error: {e}")
@@ -157,3 +162,4 @@ class Database:
 
 # Global DB instance
 db = Database(DATABASE_URL, "MadxBotz_Scrapper")
+
