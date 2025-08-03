@@ -96,7 +96,8 @@ async def send_new_link_notification(links):
                         await User.send_document(
                             chat_id=RSS_CHAT,
                             document=local_filename,
-                            thumb="database/thumb.jf"""
+                            thumb="database/thumb.jpg",
+                            caption=f"""
 <b>@ADDAFILES {link['name']}
 
 <blockquote>〽️ Powered by @ADDAFILES</blockquote></b>""",
@@ -162,4 +163,3 @@ class Database:
 
 # Global DB instance
 db = Database(DATABASE_URL, "MadxBotz_Scrapper")
-
