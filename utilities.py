@@ -25,20 +25,29 @@ async def fetch(url):
         response = await loop.run_in_executor(executor, lambda: scraper.get(url, headers=headers))
         response.raise_for_status()
         return response.text
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            logging.warning(f"Page not found (404): {url}")
+        else:
+            logging.error(f"HTTP error fetching {url}: {str(e)}")
+        return None
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching {url}: {str(e)}")
         return None
 
 def get_size_in_bytes(size_str):
-    size_str = size_str.lower()
-    size_match = re.search(r"([\d.]+)\s*(gb|mb)", size_str)
-    if size_match:
-        size_value = float(size_match.group(1))
-        size_unit = size_match.group(2)
-        if size_unit == "gb":
-            return size_value * 1024 * 1024 * 1024
-        elif size_unit == "mb":
-            return size_value * 1024 * 1024
+    try:
+        size_str = size_str.lower().strip()
+        size_match = re.search(r"([\d.]+)\s*(gb|mb)", size_str)
+        if size_match:
+            size_value = float(size_match.group(1))
+            size_unit = size_match.group(2)
+            if size_unit == "gb":
+                return size_value * 1024 * 1024 * 1024
+            elif size_unit == "mb":
+                return size_value * 1024 * 1024
+    except (ValueError, AttributeError) as e:
+        logging.warning(f"Could not convert size '{size_str}' to bytes: {e}")
     return None
 
 async def parse_links(html):
@@ -55,6 +64,7 @@ async def parse_links(html):
 async def fetch_attachments(page_url):
     html = await fetch(page_url)
     if not html:
+        logging.warning(f"No content fetched from {page_url}, skipping.")
         return None
 
     episode_pattern = re.compile(r"E(?:P)?(\d{1,2})", re.IGNORECASE)
@@ -89,6 +99,11 @@ async def fetch_attachments(page_url):
             clean_link_text = domain_removal_regex.sub("", link_text)
             clean_link_text = mkv_torrent_removal_regex.sub("", clean_link_text).strip()
 
+            if size_in_bytes is None:
+                logging.info(f"Skipping link with invalid size: {link_text}")
+                continue
+
+            # Season-based parsing
             season_match = non_episode_regex.search(link_text)
             if season_match:
                 season_number = int(season_match.group(1))
@@ -107,8 +122,9 @@ async def fetch_attachments(page_url):
                 elif season_number == highest_season and episode_start <= highest_episode_range[1]:
                     season_based_links.append({"name": clean_link_text, "link": link["href"]})
 
+            # Episode-based parsing
             episode_matches = episode_pattern.findall(link_text)
-            if episode_matches and size_in_bytes is not None:
+            if episode_matches:
                 current_episode_number = max(int(ep) for ep in episode_matches)
                 if size_in_bytes < 4 * 1024 * 1024 * 1024:
                     if current_episode_number > highest_episode_number:
@@ -116,9 +132,10 @@ async def fetch_attachments(page_url):
                         highest_episode_links = [{"name": clean_link_text, "link": link["href"]}]
                     elif current_episode_number == highest_episode_number:
                         highest_episode_links.append({"name": clean_link_text, "link": link["href"]})
-
-            elif size_in_bytes is not None and size_in_bytes < 4 * 1024 * 1024 * 1024:
-                links.append({"name": clean_link_text, "link": link["href"]})
+            else:
+                # General link if size is valid
+                if size_in_bytes < 4 * 1024 * 1024 * 1024:
+                    links.append({"name": clean_link_text, "link": link["href"]})
 
     final_links = (
         season_based_links
