@@ -35,20 +35,38 @@ async def fetch(url):
         logging.error(f"Error fetching {url}: {str(e)}")
         return None
 
-def get_size_in_bytes(size_str):
-    try:
-        size_str = size_str.lower().strip()
-        size_match = re.search(r"([\d.]+)\s*(gb|mb)", size_str)
-        if size_match:
-            size_value = float(size_match.group(1))
-            size_unit = size_match.group(2)
-            if size_unit == "gb":
-                return size_value * 1024 * 1024 * 1024
-            elif size_unit == "mb":
-                return size_value * 1024 * 1024
-    except (ValueError, AttributeError) as e:
-        logging.warning(f"Could not convert size '{size_str}' to bytes: {e}")
-    return None
+
+# -----------------------------------------------------------
+# NEW IMPROVED SIZE EXTRACTOR (FROM FILENAME + SPAN)
+# -----------------------------------------------------------
+def get_size_in_bytes(text):
+    """
+    Extract sizes like:
+    - 950MB
+    - 1.2GB
+    - 3.4gb
+    - 700mb
+    from BOTH:
+    • <span> tags
+    • Torrent filenames (.mkv.torrent)
+    """
+    if not text:
+        return None
+
+    text = text.lower()
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb)", text)
+    if not match:
+        return None
+
+    value = float(match.group(1))
+    unit = match.group(2)
+
+    if unit == "gb":
+        return int(value * 1024 * 1024 * 1024)
+    else:
+        return int(value * 1024 * 1024)
+
 
 async def parse_links(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -60,6 +78,7 @@ async def parse_links(html):
             if len(links) == 20:
                 break
     return links
+
 
 async def fetch_attachments(page_url):
     html = await fetch(page_url)
@@ -86,14 +105,18 @@ async def fetch_attachments(page_url):
     highest_episode_number = 0
     highest_episode_links = []
     season_based_links = []
-
     highest_season = 0
     highest_episode_range = (0, 0)
 
     for link in soup.find_all("a", href=True):
         if "attachment.php" in link["href"]:
+
+            # -----------------------------------------------
+            # FIXED: Extract size from span OR filename
+            # -----------------------------------------------
             size_tag = link.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
-            size_in_bytes = get_size_in_bytes(size_tag.text) if size_tag else None
+            size_text = size_tag.text if size_tag else link.get_text(strip=True)
+            size_in_bytes = get_size_in_bytes(size_text)
 
             link_text = link.get_text(strip=True)
             clean_link_text = domain_removal_regex.sub("", link_text)
@@ -152,6 +175,7 @@ async def fetch_attachments(page_url):
     await db.add_document(document)
     return document
 
+
 async def start_processing():
     main_page_html = await fetch(BASE_URL)
     if main_page_html:
@@ -162,20 +186,24 @@ async def start_processing():
     else:
         logging.warning("No content found on the main page!")
 
+
 routes = web.RouteTableDef()
 
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
     return web.json_response("MadxBotz")
 
+
 async def web_server():
     web_app = web.Application(client_max_size=30000000)
     web_app.add_routes(routes)
     return web_app
 
+
 User = Client(
     "User", session_string=USER_SESSION_STRING, api_hash=API_HASH, api_id=API_ID
 )
+
 
 async def ping_server():
     while True:
@@ -184,6 +212,7 @@ async def ping_server():
         except Exception as e:
             logging.error(f"Unexpected error: {str(e)}")
         await asyncio.sleep(60)
+
 
 async def ping_main_server():
     try:
@@ -203,6 +232,7 @@ async def ping_main_server():
             logging.warning("Couldn't connect to the site URL.")
         except Exception:
             traceback.print_exc()
+
 
 async def stop_user():
     await User.send_message(GROUP_ID, "User Session Stopped")
