@@ -69,7 +69,7 @@ async def send_new_link_notification(links):
             return
 
         for link in links:
-            local_filename = f"downloads/@MOVIES_ADDDDA {link['name']}.torrent"
+            local_filename = f"downloads/@AddaFileZ {link['name']}.torrent"
 
             if await is_valid_link(link["link"]):
                 if await download_file(link["link"], local_filename):
@@ -80,9 +80,9 @@ async def send_new_link_notification(links):
                             document=local_filename,
                             thumb="database/thumb.jpg",
                             caption=f"""
-<b>@ADDAFILES {link['name']}
+<b>@AddaFileZ {link['name']}
 
-<blockquote>〽️ Powered by @ADDAFILES</blockquote></b>""",
+<blockquote>〽️ Powered by @AddaFileZ</blockquote></b>""",
                         )
 
                         # Trigger command
@@ -98,9 +98,9 @@ async def send_new_link_notification(links):
                             document=local_filename,
                             thumb="database/thumb.jpg",
                             caption=f"""
-<b>@ADDAFILES {link['name']}
+<b>@AddaFileZ {link['name']}
 
-<blockquote>〽️ Powered by @ADDAFILES</blockquote></b>""",
+<blockquote>〽️ Powered by @AddaFileZ</blockquote></b>""",
                         )
                     except Exception as e:
                         logging.error(f"[send_document] Error: {e}")
@@ -163,3 +163,4 @@ class Database:
 
 # Global DB instance
 db = Database(DATABASE_URL, "MadxBotz_Scrapper")
+
