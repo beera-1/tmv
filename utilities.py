@@ -52,70 +52,6 @@ async def fetch(url):
 
 
 # -----------------------------------------------------------
-# SIZE DETECTION UTILITIES
-# -----------------------------------------------------------
-def parse_size_to_bytes(text):
-    """Converts strings like '8.4GB', '950MB', or '500 mb' into bytes."""
-    if not text:
-        return None
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(GB|MB|KB)", text, re.IGNORECASE)
-    if not match:
-        return None
-    val = float(match.group(1))
-    unit = match.group(2).upper()
-    if unit == "GB":
-        return int(val * 1024 * 1024 * 1024)
-    elif unit == "MB":
-        return int(val * 1024 * 1024)
-    elif unit == "KB":
-        return int(val * 1024)
-    return None
-
-def format_bytes_to_readable(size_in_bytes):
-    """Converts bytes back to clean human-readable text."""
-    if not size_in_bytes:
-        return "N/A"
-    if size_in_bytes >= 1024 * 1024 * 1024:
-        return f"{size_in_bytes / (1024**3):.2f} GB"
-    elif size_in_bytes >= 1024 * 1024:
-        return f"{size_in_bytes / (1024**2):.2f} MB"
-    return f"{size_in_bytes / 1024:.2f} KB"
-
-def extract_size_from_element(link_tag):
-    """
-    Scans the link text, preceding headers, and adjacent magnet URI (&xl=...)
-    to reliably extract the file size.
-    """
-    raw_text = link_tag.get_text(strip=True)
-    
-    # 1. Check anchor text directly
-    bytes_val = parse_size_to_bytes(raw_text)
-    if bytes_val:
-        return bytes_val
-
-    # 2. Check preceding header/bold text
-    prev_node = link_tag.find_previous(["strong", "span", "p"])
-    if prev_node:
-        bytes_val = parse_size_to_bytes(prev_node.get_text())
-        if bytes_val:
-            return bytes_val
-
-    # 3. Check magnet link payload size parameter (&xl=...)
-    magnet_tag = link_tag.find_next("a", href=re.compile(r"^magnet:\?"))
-    if magnet_tag:
-        xl_match = re.search(r"[?&]xl=(\d+)", magnet_tag.get("href", ""))
-        if xl_match:
-            return int(xl_match.group(1))
-
-    # 4. Sibling span fallback
-    size_tag = link_tag.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
-    if size_tag:
-        return parse_size_to_bytes(size_tag.get_text())
-
-    return None
-
-
-# -----------------------------------------------------------
 # CYBERLOOM / MESSYCLOUD BYPASS ENGINE
 # -----------------------------------------------------------
 async def resolve_cyberloom(start_url: str) -> dict:
@@ -211,7 +147,7 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
 
 # -----------------------------------------------------------
-# TOPIC PARSER WITH FULL SIZE & DIRECT LINK DETECTION
+# TOPIC PARSER
 # -----------------------------------------------------------
 async def parse_links(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -230,8 +166,7 @@ async def fetch_attachments(page_url):
         logging.warning(f"No content fetched from {page_url}, skipping.")
         return None
 
-    domain_removal_regex = re.compile(r"\b(www\.[^\s/$.?#].[^\s]*)\b")
-    mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$")
+    domain_removal_regex = re.compile(r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", re.IGNORECASE)
 
     soup = BeautifulSoup(html, "html.parser")
     parsed_entries = []
@@ -250,12 +185,8 @@ async def fetch_attachments(page_url):
         link_href = a_tag["href"]
         link_text = a_tag.get_text(strip=True)
 
-        clean_name = domain_removal_regex.sub("", link_text)
-        clean_name = mkv_torrent_removal_regex.sub("", clean_name).strip(" -_")
-
-        # Full Size Extraction
-        size_bytes = extract_size_from_element(a_tag)
-        size_readable = format_bytes_to_readable(size_bytes)
+        # Remove site branding from the front while keeping the full filename intact
+        clean_name = domain_removal_regex.sub("", link_text).strip(" -_")
 
         # 2. Extract corresponding magnet link if present
         magnet_href = None
@@ -267,11 +198,9 @@ async def fetch_attachments(page_url):
         cyberloom_url = None
         next_dl = a_tag.find_next("a", href=re.compile(r"https?://(?:www\.)?cyberloom\.[a-z]+/l/\w+"))
         
-        # Verify that this download button belongs before the next attachment
         if next_dl:
             if index + 1 < len(attachment_tags):
                 next_attach = attachment_tags[index + 1]
-                # If the download link appears before the next attachment tag in the DOM
                 if next_dl.sourceline is None or next_attach.sourceline is None or next_dl.sourceline < next_attach.sourceline:
                     cyberloom_url = next_dl["href"]
             else:
@@ -282,12 +211,10 @@ async def fetch_attachments(page_url):
             "torrent_link": link_href,
             "magnet": magnet_href,
             "cyberloom_url": cyberloom_url,
-            "size_bytes": size_bytes,
-            "size_str": size_readable,
             "direct_links": []
         })
 
-    # 4. Concurrently bypass all paired Cyberloom links
+    # 4. Concurrently bypass paired Cyberloom links
     bypass_tasks = []
     task_indices = []
     for i, entry in enumerate(parsed_entries):
@@ -300,14 +227,12 @@ async def fetch_attachments(page_url):
         for idx, res in zip(task_indices, results):
             if res.get("success") and res.get("links"):
                 parsed_entries[idx]["direct_links"] = res["links"]
-                if parsed_entries[idx]["size_str"] == "N/A" and res.get("size"):
-                    parsed_entries[idx]["size_str"] = res["size"]
 
-    # 5. Build structured database payload
+    # 5. Build clean database documents without extra size brackets
     final_torrent_links = []
     for entry in parsed_entries:
         final_torrent_links.append({
-            "name": f"{entry['name']} [{entry['size_str']}]",
+            "name": entry["name"],
             "link": entry["torrent_link"],
             "magnet": entry["magnet"],
             "direct_links": entry["direct_links"]
