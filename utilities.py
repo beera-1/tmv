@@ -65,9 +65,6 @@ async def download_file_bytes(url):
         return None
 
 
-# -----------------------------------------------------------
-# SIZE EXTRACTION HELPERS
-# -----------------------------------------------------------
 def extract_media_size(text):
     """Extracts media size (e.g., '10GB', '7.2GB', '850MB') from filename."""
     if not text:
@@ -76,9 +73,6 @@ def extract_media_size(text):
     return match.group(1).upper() if match else ""
 
 
-# -----------------------------------------------------------
-# CYBERLOOM / MESSYCLOUD BYPASS ENGINE
-# -----------------------------------------------------------
 async def resolve_cyberloom(start_url: str) -> dict:
     target_url = start_url.strip()
     timeout = aiohttp.ClientTimeout(total=35)
@@ -184,17 +178,14 @@ async def resolve_cyberloom(start_url: str) -> dict:
             return {"success": False, "original_url": start_url, "error": str(err)}
 
 
-# -----------------------------------------------------------
-# TOPIC PARSER & AUTO-POSTER
-# -----------------------------------------------------------
 async def parse_links(html):
     soup = BeautifulSoup(html, "html.parser")
     links = []
     for link in soup.find_all("a", href=True):
         href = link["href"]
         if "/index.php?/forums/topic/" in href:
-            # Skip invalid navigation topics like topic/183-0/
-            if re.search(r"topic/\d+-[a-zA-Z0-9-]+", href):
+            # Filter real topic slugs (ignores navigation topic 183-0)
+            if re.search(r"topic/\d{4,}-[a-zA-Z0-9-]+", href):
                 if href not in links:
                     links.append(href)
             if len(links) == 20:
@@ -203,6 +194,14 @@ async def parse_links(html):
 
 
 async def fetch_attachments(page_url):
+    # --- 1. DUPLICATE CHECK: Skip if topic already scraped and posted ---
+    try:
+        if await db.is_movie_present(page_url):
+            logging.info(f"[SKIP] Page already processed: {page_url}")
+            return None
+    except Exception:
+        pass
+
     html = await fetch(page_url)
     if not html:
         logging.warning(f"No content fetched from {page_url}, skipping.")
@@ -220,6 +219,9 @@ async def fetch_attachments(page_url):
             img_url = img_tag["src"]
 
     attachment_tags = [a for a in soup.find_all("a", href=True) if "attachment.php" in a["href"]]
+    if not attachment_tags:
+        return None
+
     parsed_entries = []
 
     for index, a_tag in enumerate(attachment_tags):
@@ -231,7 +233,6 @@ async def fetch_attachments(page_url):
 
         file_size = extract_media_size(clean_name)
 
-        # Pair corresponding cyberloom link located right below this torrent link
         cyberloom_url = None
         next_dl = a_tag.find_next("a", href=re.compile(r"https?://(?:www\.)?(?:cyberloom|inkvoyage)\.[a-z]+/(?:l|out)\b"))
 
@@ -252,7 +253,7 @@ async def fetch_attachments(page_url):
             "direct_links": []
         })
 
-    # Resolve Cyberloom links
+    # Resolve Cyberloom direct links
     bypass_tasks = []
     task_indices = []
     for i, entry in enumerate(parsed_entries):
@@ -266,7 +267,7 @@ async def fetch_attachments(page_url):
             if res.get("success") and res.get("links"):
                 parsed_entries[idx]["direct_links"] = res["links"]
 
-    # Send each torrent document binary to Telegram
+    # Send each torrent document to the Telegram channel only once
     for entry in parsed_entries:
         filename = f"@AddaFileZ_{entry['name'].replace(' ', '_')}.torrent"
         size_display = f" [{entry['size']}]" if entry['size'] else ""
@@ -280,7 +281,6 @@ async def fetch_attachments(page_url):
         caption += "\n\n<b>〽️ Powered by @AddaFileZ</b>"
 
         try:
-            # Download file bytes directly to avoid WEBPAGE_MEDIA_EMPTY
             torrent_bytes = await download_file_bytes(entry["torrent_link"])
             if torrent_bytes:
                 file_io = io.BytesIO(torrent_bytes)
@@ -298,7 +298,7 @@ async def fetch_attachments(page_url):
         except Exception as e:
             logging.error(f"Error sending document: {e}")
 
-    # Standardize links field for database queries
+    # Standardize links field and store in database
     db_links = [
         {
             "name": entry["name"],
@@ -324,7 +324,6 @@ async def start_processing():
     if main_page_html:
         fetched_links = await parse_links(main_page_html)
         for li_link in fetched_links:
-            logging.info(f"Fetching attachments from {li_link}")
             await fetch_attachments(li_link)
     else:
         logging.warning("No content found on the main page!")
@@ -354,7 +353,8 @@ async def ping_server():
             await start_processing()
         except Exception as e:
             logging.error(f"Unexpected error: {str(e)}")
-        await asyncio.sleep(60)
+        # Check every 2 minutes instead of 60 seconds to respect server resources
+        await asyncio.sleep(120)
 
 
 async def ping_main_server():
