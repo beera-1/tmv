@@ -31,73 +31,40 @@ logger = logging.getLogger(__name__)
 # CYBERLOOM CONFIG
 # ============================================================
 
-REQUEST_TIMEOUT = 20
+CYBERLOOM_TIMEOUT = 20
 
-USER_AGENT = (
+CYBERLOOM_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
 CYBERLOOM_HEADERS = {
-    "User-Agent": USER_AGENT,
+    "User-Agent": CYBERLOOM_USER_AGENT,
     "Accept": (
         "text/html,application/xhtml+xml,"
         "application/xml;q=0.9,*/*;q=0.8"
     ),
 }
 
-# Add/remove domains here if required.
+# Your supplied HTML uses www.cyberloom.best
+# Add other Cyberloom domains here if required.
 CYBERLOOM_DOMAINS = (
-    "cyberloom",
-    "messycloud",
+    "cyberloom.best",
+    "www.cyberloom.best",
 )
 
-MAX_LINKS_PER_MOVIE = 20
+MAX_CYBERLOOM_LINKS = 20
 
 
 # ============================================================
 # CYBERLOOM HELPERS
 # ============================================================
 
-def clean_cyberloom_title(title: str) -> str:
-    """Clean website prefix from title."""
-
-    if not title:
-        return "Unknown Title"
-
-    title = re.sub(
-        r"^www\.[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\s*[-_:|]*\s*",
-        "",
-        title,
-        flags=re.IGNORECASE,
-    )
-
-    return title.strip(" -_:|")
-
-
-def is_cyberloom_url(url: str) -> bool:
-    """Check whether URL belongs to a Cyberloom/MessyCloud domain."""
-
-    try:
-        parsed = urllib.parse.urlparse(url)
-
-        hostname = parsed.netloc.lower()
-
-        if not hostname:
-            return False
-
-        return any(
-            domain in hostname
-            for domain in CYBERLOOM_DOMAINS
-        )
-
-    except Exception:
-        return False
-
-
-def extract_urls(text: str):
-    """Extract HTTP/HTTPS URLs from text."""
+def extract_urls(text):
+    """
+    Extract HTTP/HTTPS URLs from Telegram text.
+    """
 
     if not text:
         return []
@@ -108,11 +75,11 @@ def extract_urls(text: str):
         flags=re.IGNORECASE,
     )
 
-    # Remove Telegram/normal punctuation accidentally attached
-    # to URLs.
     cleaned = []
 
     for url in urls:
+        # Remove common punctuation accidentally copied
+        # after the URL.
         url = url.rstrip(
             ".,!?;:)]}>\"'"
         )
@@ -123,18 +90,55 @@ def extract_urls(text: str):
     return cleaned
 
 
-def get_base_url(url: str) -> str:
+def is_cyberloom_url(url):
+    """
+    Check whether the URL belongs to Cyberloom.
+    """
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+
+        hostname = (
+            parsed.hostname or ""
+        ).lower()
+
+        hostname = hostname.rstrip(".")
+
+        return any(
+            hostname == domain
+            or hostname.endswith("." + domain)
+            for domain in CYBERLOOM_DOMAINS
+        )
+
+    except Exception:
+        return False
+
+
+def get_base_url(url):
+    """
+    Return scheme + hostname.
+    """
+
     parsed = urllib.parse.urlparse(url)
 
-    return f"{parsed.scheme}://{parsed.netloc}"
+    return (
+        f"{parsed.scheme}://"
+        f"{parsed.netloc}"
+    )
 
 
-def decode_base64(value: str):
-    """Safely decode a base64 encoded URL."""
+def decode_base64_url(value):
+    """
+    Decode normal or URL-safe Base64.
+    """
+
+    if not value:
+        return None
 
     try:
         value = value.strip()
 
+        # Fix missing Base64 padding.
         value += "=" * (
             -len(value) % 4
         )
@@ -146,27 +150,68 @@ def decode_base64(value: str):
             errors="ignore",
         )
 
+        decoded = decoded.strip()
+
         if decoded.startswith(
             ("http://", "https://")
         ):
             return decoded
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(
+            "Base64 decode failed: %s",
+            e,
+        )
 
     return None
 
 
+def clean_cyberloom_title(title):
+    """
+    Clean website prefix from movie title.
+    """
+
+    if not title:
+        return "Unknown Title"
+
+    title = re.sub(
+        r"^www\.[a-zA-Z0-9-]+\.[a-zA-Z]{2,}"
+        r"\s*[-_:|]*\s*",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+
+    return title.strip(
+        " -_:|"
+    )
+
+
 # ============================================================
-# CYBERLOOM BYPASS
+# CYBERLOOM SYNC BYPASSER
 # ============================================================
 
-def bypass_cyberloom_sync(start_url: str):
+def bypass_cyberloom_sync(start_url):
     """
     Synchronous Cyberloom extractor.
 
-    This is executed through asyncio.to_thread()
-    so requests does not block Pyrogram's event loop.
+    It follows:
+
+        Cyberloom page
+              ↓
+             cta
+              ↓
+       /out?t=........
+              ↓
+        link/hash Base64
+              ↓
+        final file page
+              ↓
+       /api/link/{token}
+              ↓
+        direct download URL
+
+    This function runs in a background thread.
     """
 
     session = requests.Session()
@@ -177,13 +222,18 @@ def bypass_cyberloom_sync(start_url: str):
 
     try:
 
-        # ======================================================
+        # ====================================================
         # STEP 1
-        # ======================================================
+        # ====================================================
+
+        logger.info(
+            "Cyberloom Step 1: %s",
+            start_url,
+        )
 
         response1 = session.get(
             start_url,
-            timeout=REQUEST_TIMEOUT,
+            timeout=CYBERLOOM_TIMEOUT,
             allow_redirects=True,
         )
 
@@ -194,22 +244,25 @@ def bypass_cyberloom_sync(start_url: str):
             "html.parser",
         )
 
+        # Your supplied HTML uses:
+        #
+        # <a id="cta" href="...">
+
         cta = soup1.find(
             "a",
             id="cta",
         )
 
-        if not cta or not cta.get("href"):
-
+        # Fallback for other versions.
+        if not cta:
             cta = soup1.find(
                 "a",
                 id="continue-btn",
             )
 
         if not cta or not cta.get("href"):
-
             raise RuntimeError(
-                "Could not find Cyberloom continue link."
+                "Cyberloom CTA/continue link was not found."
             )
 
         next_url = urllib.parse.urljoin(
@@ -217,13 +270,18 @@ def bypass_cyberloom_sync(start_url: str):
             cta["href"],
         )
 
-        # ======================================================
+        logger.info(
+            "Cyberloom CTA: %s",
+            next_url,
+        )
+
+        # ====================================================
         # STEP 2
-        # ======================================================
+        # ====================================================
 
         response2 = session.get(
             next_url,
-            timeout=REQUEST_TIMEOUT,
+            timeout=CYBERLOOM_TIMEOUT,
             allow_redirects=True,
         )
 
@@ -231,24 +289,31 @@ def bypass_cyberloom_sync(start_url: str):
 
         messy_link = None
 
-        # Original Cyberloom format:
+        # Your original code expects:
         #
-        # var link = 'BASE64'
-        # var hash = 'BASE64'
+        # var link = 'BASE64';
+        # OR
+        # var hash = 'BASE64';
 
         match = re.search(
-            r"var\s+(?:link|hash)\s*=\s*['\"]([^'\"]+)['\"]",
+            r"var\s+"
+            r"(?:link|hash)"
+            r"\s*=\s*"
+            r"['\"]([^'\"]+)['\"]",
             response2.text,
             flags=re.IGNORECASE,
         )
 
         if match:
 
-            messy_link = decode_base64(
+            messy_link = decode_base64_url(
                 match.group(1)
             )
 
-        # Fallback.
+        # ====================================================
+        # STEP 2 FALLBACK
+        # ====================================================
+
         if not messy_link:
 
             soup2 = BeautifulSoup(
@@ -256,34 +321,39 @@ def bypass_cyberloom_sync(start_url: str):
                 "html.parser",
             )
 
-            continue_btn = soup2.find(
+            continue_button = soup2.find(
                 "a",
                 id="continue-btn",
             )
 
             if (
-                continue_btn
-                and continue_btn.get("href")
+                continue_button
+                and continue_button.get("href")
             ):
 
                 messy_link = urllib.parse.urljoin(
                     response2.url,
-                    continue_btn["href"],
+                    continue_button["href"],
                 )
 
         if not messy_link:
 
             raise RuntimeError(
-                "Could not extract final Cyberloom page."
+                "Could not extract the final Cyberloom page."
             )
 
-        # ======================================================
+        logger.info(
+            "Cyberloom final page: %s",
+            messy_link,
+        )
+
+        # ====================================================
         # STEP 3
-        # ======================================================
+        # ====================================================
 
         response3 = session.get(
             messy_link,
-            timeout=REQUEST_TIMEOUT,
+            timeout=CYBERLOOM_TIMEOUT,
             allow_redirects=True,
         )
 
@@ -294,9 +364,9 @@ def bypass_cyberloom_sync(start_url: str):
             "html.parser",
         )
 
-        # ======================================================
+        # ====================================================
         # TITLE
-        # ======================================================
+        # ====================================================
 
         h1 = soup3.find("h1")
 
@@ -309,18 +379,31 @@ def bypass_cyberloom_sync(start_url: str):
 
         else:
 
-            raw_title = "Unknown Title"
+            # Fallback to title tag.
+            title_tag = soup3.find(
+                "title"
+            )
+
+            raw_title = (
+                title_tag.get_text(
+                    " ",
+                    strip=True,
+                )
+                if title_tag
+                else "Unknown Title"
+            )
 
         movie_title = clean_cyberloom_title(
             raw_title
         )
 
-        # ======================================================
+        # ====================================================
         # FILE SIZE
-        # ======================================================
+        # ====================================================
 
         size_match = re.search(
-            r"(\d+(?:\.\d+)?\s*(?:MB|GB|KB|TB))",
+            r"(\d+(?:\.\d+)?\s*"
+            r"(?:MB|GB|KB|TB))",
             response3.text,
             flags=re.IGNORECASE,
         )
@@ -331,9 +414,9 @@ def bypass_cyberloom_sync(start_url: str):
             else "N/A"
         )
 
-        # ======================================================
+        # ====================================================
         # DOWNLOAD LINKS
-        # ======================================================
+        # ====================================================
 
         base_url = get_base_url(
             messy_link
@@ -341,7 +424,9 @@ def bypass_cyberloom_sync(start_url: str):
 
         links = []
 
-        for anchor in soup3.find_all("a"):
+        for anchor in soup3.find_all(
+            "a"
+        ):
 
             label = anchor.get_text(
                 " ",
@@ -376,35 +461,46 @@ def bypass_cyberloom_sync(start_url: str):
 
             final_url = None
 
-            # ==================================================
+            # =================================================
             # TOKEN API
-            # ==================================================
+            # =================================================
 
             if token:
 
                 try:
 
                     api_url = (
-                        f"{base_url}/api/link/{token}"
+                        f"{base_url}/api/link/"
+                        f"{token}"
                     )
+
+                    api_headers = {
+                        **CYBERLOOM_HEADERS,
+                        "X-Requested-With":
+                            "XMLHttpRequest",
+                        "Referer":
+                            messy_link,
+                    }
 
                     api_response = session.get(
                         api_url,
-                        headers={
-                            **CYBERLOOM_HEADERS,
-                            "X-Requested-With":
-                                "XMLHttpRequest",
-                            "Referer":
-                                messy_link,
-                        },
-                        timeout=REQUEST_TIMEOUT,
+                        headers=api_headers,
+                        timeout=CYBERLOOM_TIMEOUT,
                     )
 
                     if api_response.ok:
 
-                        data = api_response.json()
+                        try:
+                            data = (
+                                api_response.json()
+                            )
 
-                        if data.get("success"):
+                        except ValueError:
+                            data = {}
+
+                        if data.get(
+                            "success"
+                        ):
 
                             final_url = data.get(
                                 "url"
@@ -440,7 +536,8 @@ def bypass_cyberloom_sync(start_url: str):
 
                                     final_url += (
                                         f"{separator}"
-                                        f"t={urllib.parse.quote(str(token_time))}"
+                                        f"t="
+                                        f"{urllib.parse.quote(str(token_time))}"
                                     )
 
                 except Exception as e:
@@ -450,20 +547,24 @@ def bypass_cyberloom_sync(start_url: str):
                         e,
                     )
 
-            # ==================================================
+            # =================================================
             # URL PARAMETER
-            # ==================================================
+            # =================================================
 
             elif "url=" in href:
 
                 try:
 
-                    parsed = urllib.parse.urlparse(
-                        href
+                    parsed = (
+                        urllib.parse.urlparse(
+                            href
+                        )
                     )
 
-                    query = urllib.parse.parse_qs(
-                        parsed.query
+                    query = (
+                        urllib.parse.parse_qs(
+                            parsed.query
+                        )
                     )
 
                     if query.get("url"):
@@ -476,14 +577,14 @@ def bypass_cyberloom_sync(start_url: str):
 
                 except Exception as e:
 
-                    logger.warning(
-                        "Cyberloom URL parsing error: %s",
+                    logger.debug(
+                        "URL parameter error: %s",
                         e,
                     )
 
-            # ==================================================
+            # =================================================
             # DIRECT URL
-            # ==================================================
+            # =================================================
 
             elif href.startswith(
                 (
@@ -498,14 +599,16 @@ def bypass_cyberloom_sync(start_url: str):
 
                     final_url = href
 
-            # ==================================================
+            # =================================================
             # SAVE LINK
-            # ==================================================
+            # =================================================
 
             if final_url:
 
+                # Avoid duplicate links.
                 duplicate = any(
-                    item["url"] == final_url
+                    item["url"]
+                    == final_url
                     for item in links
                 )
 
@@ -520,7 +623,7 @@ def bypass_cyberloom_sync(start_url: str):
 
             if (
                 len(links)
-                >= MAX_LINKS_PER_MOVIE
+                >= MAX_CYBERLOOM_LINKS
             ):
                 break
 
@@ -548,9 +651,14 @@ def bypass_cyberloom_sync(start_url: str):
         session.close()
 
 
-async def bypass_cyberloom(url: str):
+# ============================================================
+# ASYNC CYBERLOOM BYPASSER
+# ============================================================
+
+async def bypass_cyberloom(url):
     """
-    Async wrapper around the blocking extractor.
+    Run blocking requests code outside
+    the Pyrogram event loop.
     """
 
     return await asyncio.to_thread(
@@ -564,6 +672,9 @@ async def bypass_cyberloom(url: str):
 # ============================================================
 
 def build_cyberloom_result(result):
+    """
+    Build Telegram text + buttons.
+    """
 
     title = html.escape(
         result.get(
@@ -585,10 +696,12 @@ def build_cyberloom_result(result):
     )
 
     text = (
-        f"<b>🎬 {title}</b>\n"
-        f"<b>📦 Size:</b> "
-        f"<code>{size}</code>\n\n"
+        "<b>🎬 Cyberloom Bypassed</b>\n\n"
+        f"<b>🎬 Title:</b> {title}\n"
+        f"<b>📦 Size:</b> <code>{size}</code>\n\n"
     )
+
+    buttons = []
 
     if not links:
 
@@ -598,19 +711,21 @@ def build_cyberloom_result(result):
 
         return text, None
 
-    buttons = []
+    text += (
+        "<b>📥 Available Servers:</b>\n\n"
+    )
 
-    for index, link in enumerate(
+    for index, item in enumerate(
         links,
         start=1,
     ):
 
-        label = link.get(
+        label = item.get(
             "label",
             f"Server {index}",
         )
 
-        url = link.get(
+        url = item.get(
             "url"
         )
 
@@ -618,7 +733,7 @@ def build_cyberloom_result(result):
             continue
 
         safe_label = html.escape(
-            label[:40]
+            label[:50]
         )
 
         text += (
@@ -641,7 +756,16 @@ def build_cyberloom_result(result):
         "</blockquote>"
     )
 
-    return text, buttons
+    return (
+        text,
+        (
+            InlineKeyboardMarkup(
+                buttons
+            )
+            if buttons
+            else None
+        ),
+    )
 
 
 # ============================================================
@@ -650,6 +774,7 @@ def build_cyberloom_result(result):
 
 @Client.on_message(
     filters.private
+    & filters.text
     & filters.command("cb")
 )
 async def cyberloom_command(
@@ -668,27 +793,17 @@ async def cyberloom_command(
     if len(parts) < 2:
 
         await message.reply_text(
-            "<b>Usage:</b>\n\n"
-            "<code>/cb https://your-cyberloom-link</code>",
+            "<b>Cyberloom Bypasser</b>\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/cb https://www.cyberloom.best/...</code>",
             parse_mode=enums.ParseMode.HTML,
         )
 
         return
-
-    url_text = parts[1].strip()
 
     urls = extract_urls(
-        url_text
+        parts[1]
     )
-
-    if not urls:
-
-        await message.reply_text(
-            "<b>❌ Please provide a valid URL.</b>",
-            parse_mode=enums.ParseMode.HTML,
-        )
-
-        return
 
     cyberloom_urls = [
         url
@@ -699,53 +814,83 @@ async def cyberloom_command(
     if not cyberloom_urls:
 
         await message.reply_text(
-            "<b>❌ That doesn't appear to be a Cyberloom link.</b>",
+            "<b>❌ No valid Cyberloom link found.</b>",
             parse_mode=enums.ParseMode.HTML,
         )
 
         return
 
+    # Remove duplicates while
+    # preserving order.
+    cyberloom_urls = list(
+        dict.fromkeys(
+            cyberloom_urls
+        )
+    )
+
     status = await message.reply_text(
-        "<b>⚡ Cyberloom Bypass Started...</b>\n"
-        "Please wait.",
+        "<b>⚡ Cyberloom Bypass Started...</b>\n\n"
+        "🔗 Opening link...\n"
+        "⏳ Please wait...",
         parse_mode=enums.ParseMode.HTML,
     )
 
-    results = []
+    all_results = []
 
-    for url in dict.fromkeys(
-        cyberloom_urls
+    for index, url in enumerate(
+        cyberloom_urls,
+        start=1,
     ):
 
         try:
+
+            await status.edit_text(
+                (
+                    "<b>⚡ Cyberloom Bypass</b>\n\n"
+                    f"🔗 Processing link "
+                    f"{index}/{len(cyberloom_urls)}...\n"
+                    "⏳ Please wait..."
+                ),
+                parse_mode=enums.ParseMode.HTML,
+            )
 
             result = await bypass_cyberloom(
                 url
             )
 
-            results.append(
+            all_results.append(
                 result
             )
 
         except Exception as e:
 
             logger.exception(
-                "Cyberloom bypass failed"
+                "Cyberloom command failed"
             )
 
-            results.append(
+            all_results.append(
                 {
-                    "title": "Bypass Failed",
-                    "size": "N/A",
-                    "links": [],
-                    "error": str(e),
+                    "title":
+                        "Bypass Failed",
+                    "size":
+                        "N/A",
+                    "links":
+                        [],
+                    "source":
+                        url,
+                    "error":
+                        str(e),
                 }
             )
+
+    # ========================================================
+    # BUILD FINAL MESSAGE
+    # ========================================================
 
     final_text = ""
     final_buttons = []
 
-    for result in results:
+    for result in all_results:
 
         if result.get("error"):
 
@@ -758,26 +903,96 @@ async def cyberloom_command(
 
             continue
 
-        text, buttons = (
-            build_cyberloom_result(
-                result
+        title = html.escape(
+            result.get(
+                "title",
+                "Unknown Title",
             )
+        )
+
+        size = html.escape(
+            result.get(
+                "size",
+                "N/A",
+            )
+        )
+
+        links = result.get(
+            "links",
+            [],
         )
 
         final_text += (
-            text + "\n\n"
+            "<b>🎬 Cyberloom Bypassed</b>\n"
+            f"<b>🎬 Title:</b> {title}\n"
+            f"<b>📦 Size:</b> <code>{size}</code>\n\n"
         )
 
-        if buttons:
+        if not links:
 
-            final_buttons.extend(
-                buttons
+            final_text += (
+                "<b>❌ No download links found.</b>\n\n"
             )
+
+            continue
+
+        final_text += (
+            "<b>📥 Available Servers:</b>\n\n"
+        )
+
+        for link_index, item in enumerate(
+            links,
+            start=1,
+        ):
+
+            label = item.get(
+                "label",
+                f"Server {link_index}",
+            )
+
+            url = item.get(
+                "url"
+            )
+
+            if not url:
+                continue
+
+            safe_label = html.escape(
+                label[:50]
+            )
+
+            final_text += (
+                f"<b>📡 {safe_label}</b>\n"
+                f"<code>{html.escape(url)}</code>\n\n"
+            )
+
+            final_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"📥 {label[:30]}",
+                        url=url,
+                    )
+                ]
+            )
+
+    if not final_text:
+
+        final_text = (
+            "<b>❌ Cyberloom bypass failed.</b>"
+        )
+
+    else:
+
+        final_text += (
+            "<blockquote>"
+            "⚡ Powered by @MOVIES_ADDDDA"
+            "</blockquote>"
+        )
 
     try:
 
         await status.edit_text(
-            final_text.strip(),
+            final_text,
             reply_markup=(
                 InlineKeyboardMarkup(
                     final_buttons
@@ -789,10 +1004,23 @@ async def cyberloom_command(
             disable_web_page_preview=True,
         )
 
-    except Exception:
+    except Exception as e:
 
         logger.exception(
-            "Failed to edit Cyberloom response"
+            "Could not edit Cyberloom status"
+        )
+
+        await message.reply_text(
+            final_text,
+            reply_markup=(
+                InlineKeyboardMarkup(
+                    final_buttons
+                )
+                if final_buttons
+                else None
+            ),
+            parse_mode=enums.ParseMode.HTML,
+            disable_web_page_preview=True,
         )
 
 
@@ -806,10 +1034,10 @@ async def cyberloom_command(
     & ~filters.command(
         [
             "start",
-            "total_scraps",
             "scrap",
             "get",
             "list",
+            "total_scraps",
             "cb",
         ]
     )
@@ -842,7 +1070,8 @@ async def cyberloom_auto_detect(
     if not cyberloom_urls:
         return
 
-    unique_urls = list(
+    # Remove duplicates.
+    cyberloom_urls = list(
         dict.fromkeys(
             cyberloom_urls
         )
@@ -850,15 +1079,29 @@ async def cyberloom_auto_detect(
 
     status = await message.reply_text(
         "<b>🔗 Cyberloom link detected!</b>\n\n"
-        "⚡ Bypassing...",
+        "⚡ Starting bypass...\n"
+        "⏳ Please wait...",
         parse_mode=enums.ParseMode.HTML,
     )
 
     results = []
 
-    for url in unique_urls:
+    for index, url in enumerate(
+        cyberloom_urls,
+        start=1,
+    ):
 
         try:
+
+            await status.edit_text(
+                (
+                    "<b>🔗 Cyberloom detected!</b>\n\n"
+                    f"⚡ Processing "
+                    f"{index}/{len(cyberloom_urls)}...\n"
+                    "⏳ Please wait..."
+                ),
+                parse_mode=enums.ParseMode.HTML,
+            )
 
             result = await bypass_cyberloom(
                 url
@@ -876,12 +1119,22 @@ async def cyberloom_auto_detect(
 
             results.append(
                 {
-                    "title": "Bypass Failed",
-                    "size": "N/A",
-                    "links": [],
-                    "error": str(e),
+                    "title":
+                        "Bypass Failed",
+                    "size":
+                        "N/A",
+                    "links":
+                        [],
+                    "source":
+                        url,
+                    "error":
+                        str(e),
                 }
             )
+
+    # ========================================================
+    # FINAL AUTO RESULT
+    # ========================================================
 
     final_text = ""
     final_buttons = []
@@ -899,23 +1152,83 @@ async def cyberloom_auto_detect(
 
             continue
 
-        text, buttons = (
-            build_cyberloom_result(
-                result
+        title = html.escape(
+            result.get(
+                "title",
+                "Unknown Title",
             )
+        )
+
+        size = html.escape(
+            result.get(
+                "size",
+                "N/A",
+            )
+        )
+
+        links = result.get(
+            "links",
+            [],
         )
 
         final_text += (
-            text + "\n\n"
+            "<b>🎬 Cyberloom Bypassed</b>\n"
+            f"<b>🎬 Title:</b> {title}\n"
+            f"<b>📦 Size:</b> <code>{size}</code>\n\n"
         )
 
-        if buttons:
+        if not links:
 
-            final_buttons.extend(
-                buttons
+            final_text += (
+                "<b>❌ No download links found.</b>\n\n"
             )
 
-    final_text = final_text.strip()
+            continue
+
+        final_text += (
+            "<b>📥 Available Servers:</b>\n\n"
+        )
+
+        for link_index, item in enumerate(
+            links,
+            start=1,
+        ):
+
+            label = item.get(
+                "label",
+                f"Server {link_index}",
+            )
+
+            url = item.get(
+                "url"
+            )
+
+            if not url:
+                continue
+
+            final_text += (
+                f"<b>📡 "
+                f"{html.escape(label[:50])}"
+                f"</b>\n"
+                f"<code>"
+                f"{html.escape(url)}"
+                f"</code>\n\n"
+            )
+
+            final_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"📥 {label[:30]}",
+                        url=url,
+                    )
+                ]
+            )
+
+    final_text += (
+        "<blockquote>"
+        "⚡ Powered by @MOVIES_ADDDDA"
+        "</blockquote>"
+    )
 
     try:
 
@@ -932,10 +1245,23 @@ async def cyberloom_auto_detect(
             disable_web_page_preview=True,
         )
 
-    except Exception:
+    except Exception as e:
 
         logger.exception(
             "Failed to edit automatic Cyberloom result"
+        )
+
+        await message.reply_text(
+            final_text,
+            reply_markup=(
+                InlineKeyboardMarkup(
+                    final_buttons
+                )
+                if final_buttons
+                else None
+            ),
+            parse_mode=enums.ParseMode.HTML,
+            disable_web_page_preview=True,
         )
 
 
@@ -947,32 +1273,25 @@ async def cyberloom_auto_detect(
     filters.command("start")
     & filters.private
 )
-async def start_handler(
-    c,
-    m,
-):
+async def start_handler(c, m):
 
     try:
 
-        user_id = m.from_user.id
+        id = m.from_user.id
 
-        if not await db.is_present(
-            user_id
-        ):
+        if not await db.is_present(id):
 
-            await db.add_user(
-                user_id
-            )
+            await db.add_user(id)
 
             await c.send_message(
                 chat_id=GROUP_ID,
                 text=(
                     "<b>New User Started The Bot\n\n"
-                    f"User: "
-                    f"<a href='tg://openmessage?"
-                    f"user_id={user_id}'>"
-                    f"View User</a>\n\n"
-                    f"User ID: {user_id}</b>"
+                    "User: "
+                    f'<a href="tg://openmessage?user_id={id}">'
+                    "View User"
+                    "</a>\n\n"
+                    f"User ID: {id}</b>"
                 ),
                 parse_mode=enums.ParseMode.HTML,
             )
@@ -988,17 +1307,11 @@ async def start_handler(
                 [
                     InlineKeyboardButton(
                         "Cʜᴀɴɴᴇʟ",
-                        url=(
-                            "https://t.me/"
-                            "MOVIES_ADDDDA"
-                        ),
+                        url="https://t.me/MOVIES_ADDDDA",
                     ),
                     InlineKeyboardButton(
                         "Sᴜᴩᴩᴏʀᴛ",
-                        url=(
-                            "https://t.me/"
-                            "MOVIES_ADDDDA"
-                        ),
+                        url="https://t.me/MOVIES_ADDDDA",
                     ),
                 ],
                 [
@@ -1030,14 +1343,11 @@ async def start_handler(
 
 @Client.on_message(
     filters.private
-    & filters.command(
-        "total_scraps"
-    )
+    & filters.command("total_scraps")
 )
-async def link_count(
-    c,
-    m,
-):
+async def link_count(c, m):
+
+    user_id = m.from_user.id
 
     try:
 
@@ -1071,7 +1381,7 @@ async def link_count(
 @Client.on_message(
     filters.private
     & filters.text
-    & filters.command("scrap")
+    & filters.command(["scrap"])
 )
 async def page_scrap(
     client,
@@ -1101,8 +1411,8 @@ async def page_scrap(
     if not page_url:
 
         await message.reply_text(
-            "<b>Please provide a page url "
-            "after the command.</b>"
+            "<b>Please provide a page url after "
+            "the command.</b>"
         )
 
         return
@@ -1129,8 +1439,8 @@ async def page_scrap(
         if not page_html:
 
             await message.reply_text(
-                "<b>Unable to retrieve the "
-                f"content for the provided link "
+                f"<b>Unable to retrieve the content "
+                f"for the provided link "
                 f"'{page_url}'.</b>"
             )
 
@@ -1183,8 +1493,10 @@ async def page_scrap(
 
                 links.append(
                     {
-                        "name": link_text,
-                        "link": link["href"],
+                        "name":
+                            link_text,
+                        "link":
+                            link["href"],
                     }
                 )
 
@@ -1204,7 +1516,8 @@ async def page_scrap(
 
             caption = (
                 "<b>Movie found, but no image "
-                f"available for '{page_url}'.</b>\n\n"
+                f"available for '{page_url}'."
+                "</b>\n\n"
             )
 
         captions = []
@@ -1231,19 +1544,16 @@ async def page_scrap(
 
                     chunk_text += (
                         f"<b>\n\n🗳 "
-                        f"{link['name']}"
-                        f"\n\n🧲 • "
+                        f"{link['name']}\n\n"
+                        "🧲 • "
                         f"<code>{link['link']}</code>"
-                        f"</b>"
+                        "</b>"
                     )
 
-                if (
-                    len(
-                        caption
-                        + chunk_text
-                    )
-                    > 1024
-                ):
+                if len(
+                    caption
+                    + chunk_text
+                ) > 1024:
 
                     captions.append(
                         caption
@@ -1302,6 +1612,10 @@ async def page_scrap(
 
 # ============================================================
 # MOVIE SEARCH
+#
+# IMPORTANT:
+# Cyberloom /cb is excluded here.
+# Auto Cyberloom handler is also separate.
 # ============================================================
 
 @Client.on_message(
@@ -1309,12 +1623,12 @@ async def page_scrap(
     & filters.text
     & ~filters.command(
         [
-            "start",
-            "total_scraps",
-            "scrap",
-            "get",
             "list",
+            "get",
             "cb",
+            "start",
+            "scrap",
+            "total_scraps",
         ]
     )
 )
@@ -1328,14 +1642,6 @@ async def movie_result_1(
     ).strip()
 
     if not movie_name:
-        return
-
-    # IMPORTANT:
-    # Cyberloom links are handled above.
-    if any(
-        is_cyberloom_url(url)
-        for url in extract_urls(movie_name)
-    ):
         return
 
     if (
@@ -1353,8 +1659,10 @@ async def movie_result_1(
 
     try:
 
-        movie_docs = await db.search_movie(
-            movie_name
+        movie_docs = (
+            await db.search_movie(
+                movie_name
+            )
         )
 
         if movie_docs:
@@ -1402,11 +1710,10 @@ async def movie_result_1(
                 for name, link in links:
 
                     caption += (
-                        f"<b>\n\n🗳 {name}"
-                        f"\n\n🧲 • "
-                        f"<code>"
-                        f"{BASE_URL + link}"
-                        f"</code></b>"
+                        f"<b>\n\n🗳 {name}\n\n"
+                        "🧲 • "
+                        f"<code>{BASE_URL + link}</code>"
+                        "</b>"
                     )
 
             else:
@@ -1452,7 +1759,7 @@ async def movie_result_1(
         else:
 
             await message.reply_text(
-                "<b>Could not find any movie "
+                f"<b>Could not find any movie "
                 f"matching '{movie_name}'.</b>"
             )
 
@@ -1501,8 +1808,8 @@ async def movie_result_2(
     if not movie_name:
 
         await message.reply_text(
-            "<b>Please provide a movie name "
-            "and year after the command.</b>"
+            "<b>Please provide a movie name and year "
+            "after the command.</b>"
         )
 
         return
@@ -1522,8 +1829,10 @@ async def movie_result_2(
 
     try:
 
-        movie_docs = await db.search_movie(
-            movie_name
+        movie_docs = (
+            await db.search_movie(
+                movie_name
+            )
         )
 
         if movie_docs:
@@ -1571,11 +1880,10 @@ async def movie_result_2(
                 for name, link in links:
 
                     caption += (
-                        f"<b>\n\n🗳 {name}"
-                        f"\n\n🧲 • "
-                        f"<code>"
-                        f"{BASE_URL + link}"
-                        f"</code></b>"
+                        f"<b>\n\n🗳 {name}\n\n"
+                        "🧲 • "
+                        f"<code>{BASE_URL + link}</code>"
+                        "</b>"
                     )
 
             else:
@@ -1621,7 +1929,7 @@ async def movie_result_2(
         else:
 
             await message.reply_text(
-                "<b>Could not find any movie "
+                f"<b>Could not find any movie "
                 f"matching '{movie_name}'.</b>"
             )
 
@@ -1634,15 +1942,11 @@ async def movie_result_2(
 
 
 # ============================================================
-# PAGINATION
+# LIST / PAGINATION
 # ============================================================
 
 user_pagination = {}
 
-
-# ============================================================
-# /LIST
-# ============================================================
 
 @Client.on_message(
     filters.private
@@ -1653,12 +1957,15 @@ async def list_documents(
     message,
 ):
 
-    user_id = message.from_user.id
+    user_id = m_user_id = (
+        message.from_user.id
+    )
 
     user_pagination[
         user_id
     ] = {
-        "current_index": 0
+        "current_index":
+            0
     }
 
     try:
@@ -1740,7 +2047,7 @@ async def send_initial_document(
         InlineKeyboardButton(
             "❌",
             callback_data="delete",
-        )
+        ),
     ]
 
     if index < len(
@@ -1751,8 +2058,7 @@ async def send_initial_document(
             InlineKeyboardButton(
                 "➡️",
                 callback_data=(
-                    f"next_"
-                    f"{user_id}_"
+                    f"next_{user_id}_"
                     f"{index + 1}"
                 ),
             )
@@ -1825,8 +2131,7 @@ async def show_document(
             InlineKeyboardButton(
                 "⬅️",
                 callback_data=(
-                    f"prev_"
-                    f"{user_id}_"
+                    f"prev_{user_id}_"
                     f"{index - 1}"
                 ),
             )
@@ -1847,8 +2152,7 @@ async def show_document(
             InlineKeyboardButton(
                 "➡️",
                 callback_data=(
-                    f"next_"
-                    f"{user_id}_"
+                    f"next_{user_id}_"
                     f"{index + 1}"
                 ),
             )
@@ -1896,17 +2200,17 @@ async def show_document(
 
         try:
 
-            await client.edit_message_text(
+            await client.edit_message_caption(
                 chat_id=message.chat.id,
                 message_id=message.id,
-                text=caption,
+                caption=caption,
                 reply_markup=reply_markup,
             )
 
         except Exception as e:
 
             await message.reply_text(
-                f"Error editing message: {e}"
+                f"Error editing caption: {e}"
             )
 
 
@@ -1914,14 +2218,12 @@ async def show_document(
 # SPLIT CAPTION
 # ============================================================
 
-def split_caption(
-    document
-):
+def split_caption(document):
 
     caption = (
         f"<b>Title: "
         f"{document.get('name', 'Unknown Movie')}"
-        f"</b>\n\n"
+        "</b>\n\n"
     )
 
     img_url = document.get(
@@ -1971,19 +2273,25 @@ def split_caption(
             ].rfind("\n")
         )
 
+        # Safety fallback if no newline exists.
         if split_point <= 0:
-            split_point = max_caption_length
+            split_point = (
+                max_caption_length
+            )
 
         caption_parts.append(
             {
-                "caption": caption[
-                    :split_point
-                ],
-                "img_url": img_url,
-                "text": document.get(
-                    "name",
-                    "Unknown Movie",
-                ),
+                "caption":
+                    caption[
+                        :split_point
+                    ],
+                "img_url":
+                    img_url,
+                "text":
+                    document.get(
+                        "name",
+                        "Unknown Movie",
+                    ),
             }
         )
 
@@ -1993,12 +2301,15 @@ def split_caption(
 
     caption_parts.append(
         {
-            "caption": caption,
-            "img_url": img_url,
-            "text": document.get(
-                "name",
-                "Unknown Movie",
-            ),
+            "caption":
+                caption,
+            "img_url":
+                img_url,
+            "text":
+                document.get(
+                    "name",
+                    "Unknown Movie",
+                ),
         }
     )
 
