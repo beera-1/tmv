@@ -14,7 +14,6 @@ from pyrogram import enums, Client
 import traceback
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
 
 message_lock = asyncio.Lock()
 executor = ThreadPoolExecutor()
@@ -30,7 +29,11 @@ HTTP_HEADERS = {
 async def fetch(url):
     scraper = cloudscraper.create_scraper()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
     }
     loop = asyncio.get_event_loop()
     try:
@@ -49,19 +52,78 @@ async def fetch(url):
 
 
 # -----------------------------------------------------------
+# SIZE DETECTION UTILITIES
+# -----------------------------------------------------------
+def parse_size_to_bytes(text):
+    """Converts strings like '8.4GB', '950MB', or '500 mb' into bytes."""
+    if not text:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(GB|MB|KB)", text, re.IGNORECASE)
+    if not match:
+        return None
+    val = float(match.group(1))
+    unit = match.group(2).upper()
+    if unit == "GB":
+        return int(val * 1024 * 1024 * 1024)
+    elif unit == "MB":
+        return int(val * 1024 * 1024)
+    elif unit == "KB":
+        return int(val * 1024)
+    return None
+
+def format_bytes_to_readable(size_in_bytes):
+    """Converts bytes back to clean human-readable text."""
+    if not size_in_bytes:
+        return "N/A"
+    if size_in_bytes >= 1024 * 1024 * 1024:
+        return f"{size_in_bytes / (1024**3):.2f} GB"
+    elif size_in_bytes >= 1024 * 1024:
+        return f"{size_in_bytes / (1024**2):.2f} MB"
+    return f"{size_in_bytes / 1024:.2f} KB"
+
+def extract_size_from_element(link_tag):
+    """
+    Scans the link text, preceding headers, and adjacent magnet URI (&xl=...)
+    to reliably extract the file size.
+    """
+    raw_text = link_tag.get_text(strip=True)
+    
+    # 1. Check anchor text directly
+    bytes_val = parse_size_to_bytes(raw_text)
+    if bytes_val:
+        return bytes_val
+
+    # 2. Check preceding header/bold text
+    prev_node = link_tag.find_previous(["strong", "span", "p"])
+    if prev_node:
+        bytes_val = parse_size_to_bytes(prev_node.get_text())
+        if bytes_val:
+            return bytes_val
+
+    # 3. Check magnet link payload size parameter (&xl=...)
+    magnet_tag = link_tag.find_next("a", href=re.compile(r"^magnet:\?"))
+    if magnet_tag:
+        xl_match = re.search(r"[?&]xl=(\d+)", magnet_tag.get("href", ""))
+        if xl_match:
+            return int(xl_match.group(1))
+
+    # 4. Sibling span fallback
+    size_tag = link_tag.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
+    if size_tag:
+        return parse_size_to_bytes(size_tag.get_text())
+
+    return None
+
+
+# -----------------------------------------------------------
 # CYBERLOOM / MESSYCLOUD BYPASS ENGINE
 # -----------------------------------------------------------
 async def resolve_cyberloom(start_url: str) -> dict:
-    """
-    Resolves Cyberloom/Inkvoyage/MessyCloud redirect chains
-    and extracts direct download endpoints.
-    """
     target_url = start_url.strip()
     timeout = aiohttp.ClientTimeout(total=20)
 
     async with aiohttp.ClientSession(headers=HTTP_HEADERS, timeout=timeout) as session:
         try:
-            # Step 1: Initial Landing Request
             async with session.get(target_url, allow_redirects=True) as res1:
                 html1 = await res1.text()
 
@@ -76,7 +138,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
                 html2 = html1
                 next_url = target_url
 
-            # Step 2: Extract Embedded Base64 Payload or Continue Target
             match = re.search(r"var (?:link|hash)\s*=\s*'([^']+)'", html2)
             if match:
                 decoded_url = base64.b64decode(match.group(1)).decode("utf-8")
@@ -85,7 +146,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
                 cont_btn = soup2.find("a", id="continue-btn")
                 decoded_url = cont_btn["href"] if (cont_btn and cont_btn.get("href")) else next_url
 
-            # Step 3: Fetch Final Host (MessyCloud / CDN Landing)
             async with session.get(decoded_url, allow_redirects=True) as res3:
                 final_html = await res3.text()
                 landing_host_url = str(res3.url)
@@ -94,7 +154,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
             parsed_host = urllib.parse.urlparse(landing_host_url)
             base_url = f"{parsed_host.scheme}://{parsed_host.netloc}"
 
-            # Step 4: Extract Metadata
             raw_title = soup3.find("h1").text.strip() if soup3.find("h1") else "Direct File"
             cleaned_title = re.sub(
                 r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", "", raw_title, flags=re.IGNORECASE
@@ -104,8 +163,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
             file_size = size_match.group(1) if size_match else "Unknown Size"
 
             direct_links = []
-
-            # Step 5: Resolve Direct Links & Dynamic Tokens
             for a_tag in soup3.find_all("a"):
                 label = a_tag.get_text(strip=True)
                 token = a_tag.get("data-token")
@@ -115,7 +172,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
                     continue
 
                 final_download_url = None
-
                 if token:
                     api_endpoint = f"{base_url}/api/link/{token}"
                     api_headers = {
@@ -155,26 +211,8 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
 
 # -----------------------------------------------------------
-# SIZE EXTRACTOR
+# TOPIC PARSER WITH FULL SIZE & DIRECT LINK DETECTION
 # -----------------------------------------------------------
-def get_size_in_bytes(text):
-    if not text:
-        return None
-
-    text = text.lower()
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb)", text)
-    if not match:
-        return None
-
-    value = float(match.group(1))
-    unit = match.group(2)
-
-    if unit == "gb":
-        return int(value * 1024 * 1024 * 1024)
-    else:
-        return int(value * 1024 * 1024)
-
-
 async def parse_links(html):
     soup = BeautifulSoup(html, "html.parser")
     links = []
@@ -186,21 +224,17 @@ async def parse_links(html):
                 break
     return links
 
-
 async def fetch_attachments(page_url):
     html = await fetch(page_url)
     if not html:
         logging.warning(f"No content fetched from {page_url}, skipping.")
         return None
 
-    episode_pattern = re.compile(r"E(?:P)?(\d{1,2})", re.IGNORECASE)
-    non_episode_regex = re.compile(r"S(\d{1,2})\s*(?:E|EP)?\s*\(?(\d+(?:-\d+))\)?", re.IGNORECASE)
     domain_removal_regex = re.compile(r"\b(www\.[^\s/$.?#].[^\s]*)\b")
     mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$")
 
     soup = BeautifulSoup(html, "html.parser")
-    links = []
-    cyberloom_urls = []
+    parsed_entries = []
 
     content_div = soup.find("div", class_="cPost_contentWrap")
     img_url = None
@@ -209,92 +243,79 @@ async def fetch_attachments(page_url):
         if img_tag and img_tag.get("src"):
             img_url = img_tag["src"]
 
-    highest_episode_number = 0
-    highest_episode_links = []
-    season_based_links = []
-    highest_season = 0
-    highest_episode_range = (0, 0)
+    # 1. Locate all attachment links
+    attachment_tags = [a for a in soup.find_all("a", href=True) if "attachment.php" in a["href"]]
 
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
+    for index, a_tag in enumerate(attachment_tags):
+        link_href = a_tag["href"]
+        link_text = a_tag.get_text(strip=True)
 
-        # --- AUTO-DETECT CYBERLOOM / MESSYCLOUD LINKS ---
-        if any(d in href for d in ["cyberloom.", "inkvoyage.", "messycloud."]):
-            if href not in cyberloom_urls:
-                cyberloom_urls.append(href)
+        clean_name = domain_removal_regex.sub("", link_text)
+        clean_name = mkv_torrent_removal_regex.sub("", clean_name).strip(" -_")
 
-        # --- TORRENT ATTACHMENTS ---
-        if "attachment.php" in href:
-            size_tag = link.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
-            size_text = size_tag.text if size_tag else link.get_text(strip=True)
-            size_in_bytes = get_size_in_bytes(size_text)
+        # Full Size Extraction
+        size_bytes = extract_size_from_element(a_tag)
+        size_readable = format_bytes_to_readable(size_bytes)
 
-            link_text = link.get_text(strip=True)
-            clean_link_text = domain_removal_regex.sub("", link_text)
-            clean_link_text = mkv_torrent_removal_regex.sub("", clean_link_text).strip()
+        # 2. Extract corresponding magnet link if present
+        magnet_href = None
+        next_magnet = a_tag.find_next("a", href=re.compile(r"^magnet:\?"))
+        if next_magnet:
+            magnet_href = next_magnet["href"]
 
-            if size_in_bytes is None:
-                logging.info(f"Skipping link with invalid size: {link_text}")
-                continue
-
-            # Season-based parsing
-            season_match = non_episode_regex.search(link_text)
-            if season_match:
-                season_number = int(season_match.group(1))
-                episode_range = season_match.group(2)
-                if "-" in episode_range:
-                    episode_start, episode_end = map(int, episode_range.split("-"))
-                else:
-                    episode_start = episode_end = int(episode_range)
-
-                if season_number > highest_season or (
-                    season_number == highest_season and episode_end > highest_episode_range[1]
-                ):
-                    highest_season = season_number
-                    highest_episode_range = (episode_start, episode_end)
-                    season_based_links = [{"name": clean_link_text, "link": href}]
-                elif season_number == highest_season and episode_start <= highest_episode_range[1]:
-                    season_based_links.append({"name": clean_link_text, "link": href})
-
-            # Episode-based parsing
-            episode_matches = episode_pattern.findall(link_text)
-            if episode_matches:
-                current_episode_number = max(int(ep) for ep in episode_matches)
-                if size_in_bytes < 4 * 1024 * 1024 * 1024:
-                    if current_episode_number > highest_episode_number:
-                        highest_episode_number = current_episode_number
-                        highest_episode_links = [{"name": clean_link_text, "link": href}]
-                    elif current_episode_number == highest_episode_number:
-                        highest_episode_links.append({"name": clean_link_text, "link": href})
+        # 3. Locate corresponding Cyberloom direct link below the attachment
+        cyberloom_url = None
+        next_dl = a_tag.find_next("a", href=re.compile(r"https?://(?:www\.)?cyberloom\.[a-z]+/l/\w+"))
+        
+        # Verify that this download button belongs before the next attachment
+        if next_dl:
+            if index + 1 < len(attachment_tags):
+                next_attach = attachment_tags[index + 1]
+                # If the download link appears before the next attachment tag in the DOM
+                if next_dl.sourceline is None or next_attach.sourceline is None or next_dl.sourceline < next_attach.sourceline:
+                    cyberloom_url = next_dl["href"]
             else:
-                if size_in_bytes < 4 * 1024 * 1024 * 1024:
-                    links.append({"name": clean_link_text, "link": href})
+                cyberloom_url = next_dl["href"]
 
-    final_links = (
-        season_based_links
-        if season_based_links
-        else (highest_episode_links if highest_episode_links else links)
-    )
+        parsed_entries.append({
+            "name": clean_name,
+            "torrent_link": link_href,
+            "magnet": magnet_href,
+            "cyberloom_url": cyberloom_url,
+            "size_bytes": size_bytes,
+            "size_str": size_readable,
+            "direct_links": []
+        })
 
-    # --- RESOLVE AUTO-DETECTED DIRECT LINKS ---
-    direct_download_results = []
-    if cyberloom_urls:
-        logging.info(f"Auto-detected {len(cyberloom_urls)} Cyberloom link(s). Resolving direct links...")
-        bypass_tasks = [resolve_cyberloom(u) for u in cyberloom_urls]
-        resolved_results = await asyncio.gather(*bypass_tasks)
+    # 4. Concurrently bypass all paired Cyberloom links
+    bypass_tasks = []
+    task_indices = []
+    for i, entry in enumerate(parsed_entries):
+        if entry["cyberloom_url"]:
+            bypass_tasks.append(resolve_cyberloom(entry["cyberloom_url"]))
+            task_indices.append(i)
 
-        for res in resolved_results:
+    if bypass_tasks:
+        results = await asyncio.gather(*bypass_tasks)
+        for idx, res in zip(task_indices, results):
             if res.get("success") and res.get("links"):
-                for item in res["links"]:
-                    direct_download_results.append({
-                        "name": f"⚡ Direct [{item['name']}] - {res['title']} ({res['size']})",
-                        "link": item["link"]
-                    })
+                parsed_entries[idx]["direct_links"] = res["links"]
+                if parsed_entries[idx]["size_str"] == "N/A" and res.get("size"):
+                    parsed_entries[idx]["size_str"] = res["size"]
+
+    # 5. Build structured database payload
+    final_torrent_links = []
+    for entry in parsed_entries:
+        final_torrent_links.append({
+            "name": f"{entry['name']} [{entry['size_str']}]",
+            "link": entry["torrent_link"],
+            "magnet": entry["magnet"],
+            "direct_links": entry["direct_links"]
+        })
 
     document = {
         "img_url": img_url,
-        "links": final_links,
-        "direct_links": direct_download_results,  # Store direct links in DB document
+        "links": final_torrent_links,
         "added_on": datetime.utcnow(),
     }
 
