@@ -1,5 +1,4 @@
 import asyncio
-import io
 import logging
 import re
 import urllib.parse
@@ -10,13 +9,9 @@ from datetime import datetime
 from database import db
 from configs import *
 from aiohttp import web
-from pyrogram import enums, Client
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import traceback
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
-message_lock = asyncio.Lock()
 executor = ThreadPoolExecutor()
 
 HTTP_HEADERS = {
@@ -47,21 +42,6 @@ async def fetch(url):
         return None
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching {url}: {str(e)}")
-        return None
-
-
-async def download_file_bytes(url):
-    """Downloads raw torrent binary bytes to bypass Telegram WEBPAGE_MEDIA_EMPTY errors."""
-    scraper = cloudscraper.create_scraper()
-    loop = asyncio.get_event_loop()
-    try:
-        response = await loop.run_in_executor(
-            executor, lambda: scraper.get(url, headers=HTTP_HEADERS, timeout=25)
-        )
-        response.raise_for_status()
-        return response.content
-    except Exception as e:
-        logging.error(f"Failed to download torrent binary from {url}: {e}")
         return None
 
 
@@ -106,7 +86,7 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
             final_html = ""
             landing_host_url = destination_url
-            for attempt in range(3):
+            for _ in range(3):
                 async with session.get(destination_url, allow_redirects=True) as res3:
                     final_html = await res3.text()
                     landing_host_url = str(res3.url)
@@ -168,14 +148,13 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
             return {
                 "success": True,
-                "original_url": start_url,
                 "title": cleaned_title,
                 "size": file_size,
                 "links": direct_links,
             }
 
         except Exception as err:
-            return {"success": False, "original_url": start_url, "error": str(err)}
+            return {"success": False, "error": str(err)}
 
 
 async def parse_links(html):
@@ -184,7 +163,6 @@ async def parse_links(html):
     for link in soup.find_all("a", href=True):
         href = link["href"]
         if "/index.php?/forums/topic/" in href:
-            # Filter real topic slugs (ignores navigation topic 183-0)
             if re.search(r"topic/\d{4,}-[a-zA-Z0-9-]+", href):
                 if href not in links:
                     links.append(href)
@@ -194,17 +172,12 @@ async def parse_links(html):
 
 
 async def fetch_attachments(page_url):
-    # --- 1. DUPLICATE CHECK: Skip if topic already scraped and posted ---
-    try:
-        if await db.is_movie_present(page_url):
-            logging.info(f"[SKIP] Page already processed: {page_url}")
-            return None
-    except Exception:
-        pass
+    # Skip if page is already indexed in DB
+    if await db.is_movie_present(page_url):
+        return None
 
     html = await fetch(page_url)
     if not html:
-        logging.warning(f"No content fetched from {page_url}, skipping.")
         return None
 
     domain_removal_regex = re.compile(r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", re.IGNORECASE)
@@ -223,7 +196,6 @@ async def fetch_attachments(page_url):
         return None
 
     parsed_entries = []
-
     for index, a_tag in enumerate(attachment_tags):
         link_href = a_tag["href"]
         link_text = a_tag.get_text(strip=True)
@@ -247,13 +219,12 @@ async def fetch_attachments(page_url):
         parsed_entries.append({
             "name": clean_name,
             "link": link_href,
-            "torrent_link": link_href,
             "size": file_size,
             "cyberloom_url": cyberloom_url,
             "direct_links": []
         })
 
-    # Resolve Cyberloom direct links
+    # Resolve direct links concurrently
     bypass_tasks = []
     task_indices = []
     for i, entry in enumerate(parsed_entries):
@@ -267,38 +238,6 @@ async def fetch_attachments(page_url):
             if res.get("success") and res.get("links"):
                 parsed_entries[idx]["direct_links"] = res["links"]
 
-    # Send each torrent document to the Telegram channel only once
-    for entry in parsed_entries:
-        filename = f"@AddaFileZ_{entry['name'].replace(' ', '_')}.torrent"
-        size_display = f" [{entry['size']}]" if entry['size'] else ""
-        caption = f"<b>@AddaFileZ {entry['name']}{size_display}</b>"
-
-        buttons = []
-        for dl in entry["direct_links"]:
-            buttons.append([InlineKeyboardButton(f"⚡ Direct Link ({dl['name']})", url=dl["link"])])
-
-        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-        caption += "\n\n<b>〽️ Powered by @AddaFileZ</b>"
-
-        try:
-            torrent_bytes = await download_file_bytes(entry["torrent_link"])
-            if torrent_bytes:
-                file_io = io.BytesIO(torrent_bytes)
-                file_io.name = filename
-
-                await User.send_document(
-                    chat_id=GROUP_ID,
-                    document=file_io,
-                    file_name=filename,
-                    caption=caption,
-                    reply_markup=reply_markup,
-                    parse_mode=enums.ParseMode.HTML
-                )
-                await asyncio.sleep(2)
-        except Exception as e:
-            logging.error(f"Error sending document: {e}")
-
-    # Standardize links field and store in database
     db_links = [
         {
             "name": entry["name"],
@@ -315,6 +254,7 @@ async def fetch_attachments(page_url):
         "added_on": datetime.utcnow(),
     }
 
+    # DB handles single delivery without duplication
     await db.add_document(document)
     return document
 
@@ -325,8 +265,6 @@ async def start_processing():
         fetched_links = await parse_links(main_page_html)
         for li_link in fetched_links:
             await fetch_attachments(li_link)
-    else:
-        logging.warning("No content found on the main page!")
 
 
 routes = web.RouteTableDef()
@@ -342,42 +280,21 @@ async def web_server():
     return web_app
 
 
-User = Client(
-    "User", session_string=USER_SESSION_STRING, api_hash=API_HASH, api_id=API_ID
-)
-
-
 async def ping_server():
     while True:
         try:
             await start_processing()
         except Exception as e:
-            logging.error(f"Unexpected error: {str(e)}")
-        # Check every 2 minutes instead of 60 seconds to respect server resources
+            logging.error(f"Periodic crawl error: {str(e)}")
         await asyncio.sleep(120)
 
 
 async def ping_main_server():
-    try:
-        await User.start()
-        logging.info("User Session started.")
-        await User.send_message(GROUP_ID, "User Session Started")
-    except Exception as e:
-        logging.error(f"Error Starting User: {str(e)}")
-
     while True:
         await asyncio.sleep(250)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 async with session.get(SERVER_URL) as resp:
                     logging.info(f"Pinged server with response: {resp.status}")
-        except TimeoutError:
-            logging.warning("Couldn't connect to the site URL.")
         except Exception:
-            traceback.print_exc()
-
-
-async def stop_user():
-    await User.send_message(GROUP_ID, "User Session Stopped")
-    await User.stop()
-    logging.info("User Session Stopped.")
+            pass
