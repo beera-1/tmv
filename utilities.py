@@ -49,7 +49,7 @@ async def fetch(url):
         return None
 
 async def fetch_bytes(url):
-    """Downloads raw binary file bytes (.torrent) to upload to Telegram."""
+    """Downloads raw binary file bytes to upload directly to Telegram."""
     scraper = cloudscraper.create_scraper()
     headers = HTTP_HEADERS
     loop = asyncio.get_event_loop()
@@ -60,23 +60,18 @@ async def fetch_bytes(url):
         response.raise_for_status()
         return response.content
     except Exception as e:
-        logging.error(f"Error fetching binary file {url}: {str(e)}")
+        logging.error(f"Error downloading file {url}: {str(e)}")
         return None
 
 
 # -----------------------------------------------------------
 # SIZE EXTRACTION HELPERS
 # -----------------------------------------------------------
-def extract_media_size(text):
-    """Extracts human-readable size (e.g. 1.6GB, 700MB) for captions."""
-    if not text:
-        return ""
-    match = re.search(r"(\d+(?:\.\d+)?\s*(?:GB|MB))", text, re.IGNORECASE)
-    return match.group(1).upper() if match else ""
-
-
 def get_size_in_bytes(text):
-    """Extracts raw size in bytes for threshold filtering."""
+    """
+    Extract sizes like: 950MB, 1.2GB, 3.4gb, 700mb
+    from both span tags and torrent filenames.
+    """
     if not text:
         return None
 
@@ -98,6 +93,9 @@ def get_size_in_bytes(text):
 # CYBERLOOM / MESSYCLOUD BYPASS ENGINE
 # -----------------------------------------------------------
 async def resolve_cyberloom(start_url: str) -> dict:
+    if not start_url:
+        return {"success": False, "links": []}
+
     target_url = start_url.strip()
     timeout = aiohttp.ClientTimeout(total=20)
 
@@ -175,7 +173,7 @@ async def resolve_cyberloom(start_url: str) -> dict:
             }
 
         except Exception as err:
-            return {"success": False, "error": str(err)}
+            return {"success": False, "links": [], "error": str(err)}
 
 
 # -----------------------------------------------------------
@@ -233,14 +231,14 @@ async def fetch_attachments(page_url):
         size_text = size_tag.text if size_tag else link_text
         size_in_bytes = get_size_in_bytes(size_text)
 
-        clean_name = domain_removal_regex.sub("", link_text)
-        clean_name = mkv_torrent_removal_regex.sub("", clean_name).strip(" -_")
-        human_size = extract_media_size(size_text) or extract_media_size(clean_name)
+        clean_link_text = domain_removal_regex.sub("", link_text)
+        clean_link_text = mkv_torrent_removal_regex.sub("", clean_link_text).strip(" -_")
 
         if size_in_bytes is None:
+            logging.info(f"Skipping link with invalid size: {link_text}")
             continue
 
-        # Look for corresponding Cyberloom direct link button
+        # Look for corresponding Cyberloom link
         cyberloom_url = None
         next_dl = a_tag.find_next("a", href=re.compile(r"https?://(?:www\.)?cyberloom\.[a-z]+/l/\w+"))
         if next_dl:
@@ -252,9 +250,8 @@ async def fetch_attachments(page_url):
                 cyberloom_url = next_dl["href"]
 
         entry = {
-            "name": clean_name,
+            "name": clean_link_text,
             "link": link_href,
-            "size": human_size,
             "cyberloom_url": cyberloom_url,
             "direct_links": []
         }
@@ -289,19 +286,20 @@ async def fetch_attachments(page_url):
                 elif current_episode_number == highest_episode_number:
                     highest_episode_links.append(entry)
         else:
+            # General link if size is valid
             if size_in_bytes < 4 * 1024 * 1024 * 1024:
                 general_links.append(entry)
 
-    parsed_entries = (
+    final_links = (
         season_based_links
         if season_based_links
         else (highest_episode_links if highest_episode_links else general_links)
     )
 
-    # Concurrently resolve Cyberloom links
+    # Concurrently resolve Cyberloom download links
     bypass_tasks = []
     task_indices = []
-    for i, entry in enumerate(parsed_entries):
+    for i, entry in enumerate(final_links):
         if entry.get("cyberloom_url"):
             bypass_tasks.append(resolve_cyberloom(entry["cyberloom_url"]))
             task_indices.append(i)
@@ -310,33 +308,32 @@ async def fetch_attachments(page_url):
         results = await asyncio.gather(*bypass_tasks)
         for idx, res in zip(task_indices, results):
             if res and res.get("success") and res.get("links"):
-                parsed_entries[idx]["direct_links"] = res["links"]
+                final_links[idx]["direct_links"] = res["links"]
 
-    # Post to Telegram
-    for entry in parsed_entries:
-        filename = f"@AddaFileZ_{entry.get('name', 'file').replace(' ', '_')}.torrent"
-        size_display = f" [{entry['size']}]" if entry.get('size') else ""
-        caption = f"<b>@AddaFileZ {entry.get('name', '')}{size_display}</b>"
-
-        buttons = []
-        for dl in entry.get("direct_links", []):
-            dl_name = dl.get("name", "Download")
-            dl_link = dl.get("link")
-            if dl_link:
-                buttons.append([InlineKeyboardButton(f"⚡ Direct Link ({dl_name})", url=dl_link)])
-
-        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-        caption += "\n\n<b>〽️ Powered by @AddaFileZ</b>"
-
+    # Post documents safely to Telegram as in-memory binary streams with Direct Link buttons
+    for entry in final_links:
         try:
-            torrent_raw = await fetch_bytes(entry["link"])
-            if torrent_raw:
-                torrent_stream = io.BytesIO(torrent_raw)
-                torrent_stream.name = filename
+            filename = f"@AddaFileZ_{entry.get('name', 'file').replace(' ', '_')}.torrent"
+            caption = f"<b>@AddaFileZ {entry.get('name', '')}</b>\n\n<b>〽️ Powered by @AddaFileZ</b>"
+
+            # Create interactive download buttons from bypassed Cyberloom links
+            buttons = []
+            for dl in entry.get("direct_links", []):
+                dl_name = dl.get("name", "Direct Download")
+                dl_link = dl.get("link")
+                if dl_link:
+                    buttons.append([InlineKeyboardButton(f"⚡ {dl_name}", url=dl_link)])
+
+            reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+            raw_bytes = await fetch_bytes(entry["link"])
+            if raw_bytes:
+                file_stream = io.BytesIO(raw_bytes)
+                file_stream.name = filename
 
                 await User.send_document(
                     chat_id=GROUP_ID,
-                    document=torrent_stream,
+                    document=file_stream,
                     file_name=filename,
                     caption=caption,
                     reply_markup=reply_markup,
@@ -344,16 +341,16 @@ async def fetch_attachments(page_url):
                 )
                 await asyncio.sleep(2)
             else:
-                logging.warning(f"Could not fetch torrent file for: {entry.get('name')}")
+                logging.warning(f"Failed to download raw bytes for: {entry.get('name')}")
         except Exception as e:
             logging.error(f"Error sending document: {e}")
 
     document = {
         "img_url": img_url,
-        "page_url": page_url,
-        "links": parsed_entries,
+        "links": final_links,
         "added_on": datetime.utcnow(),
     }
+
     await db.add_document(document)
     return document
 
