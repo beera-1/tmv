@@ -11,6 +11,7 @@ from database import db
 from configs import *
 from aiohttp import web
 from pyrogram import enums, Client
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import traceback
 import requests
 from concurrent.futures import ThreadPoolExecutor
@@ -52,6 +53,17 @@ async def fetch(url):
 
 
 # -----------------------------------------------------------
+# SIZE EXTRACTION HELPERS
+# -----------------------------------------------------------
+def extract_media_size(text):
+    """Extracts actual video file size (e.g., '1.6GB', '700MB') rather than torrent sizes."""
+    if not text:
+        return ""
+    match = re.search(r"(\d+(?:\.\d+)?\s*(?:GB|MB))", text, re.IGNORECASE)
+    return match.group(1).upper() if match else ""
+
+
+# -----------------------------------------------------------
 # CYBERLOOM / MESSYCLOUD BYPASS ENGINE
 # -----------------------------------------------------------
 async def resolve_cyberloom(start_url: str) -> dict:
@@ -89,14 +101,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
             soup3 = BeautifulSoup(final_html, "html.parser")
             parsed_host = urllib.parse.urlparse(landing_host_url)
             base_url = f"{parsed_host.scheme}://{parsed_host.netloc}"
-
-            raw_title = soup3.find("h1").text.strip() if soup3.find("h1") else "Direct File"
-            cleaned_title = re.sub(
-                r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", "", raw_title, flags=re.IGNORECASE
-            ).strip(" -_")
-
-            size_match = re.search(r"(\d+\.?\d*\s*(?:MB|GB|KB))", final_html)
-            file_size = size_match.group(1) if size_match else "Unknown Size"
 
             direct_links = []
             for a_tag in soup3.find_all("a"):
@@ -136,18 +140,15 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
             return {
                 "success": True,
-                "original_url": start_url,
-                "title": cleaned_title,
-                "size": file_size,
                 "links": direct_links,
             }
 
         except Exception as err:
-            return {"success": False, "original_url": start_url, "error": str(err)}
+            return {"success": False, "error": str(err)}
 
 
 # -----------------------------------------------------------
-# TOPIC PARSER
+# TOPIC PARSER & AUTO-POSTER
 # -----------------------------------------------------------
 async def parse_links(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -160,6 +161,7 @@ async def parse_links(html):
                 break
     return links
 
+
 async def fetch_attachments(page_url):
     html = await fetch(page_url)
     if not html:
@@ -167,37 +169,27 @@ async def fetch_attachments(page_url):
         return None
 
     domain_removal_regex = re.compile(r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", re.IGNORECASE)
+    mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$", re.IGNORECASE)
 
     soup = BeautifulSoup(html, "html.parser")
-    parsed_entries = []
-
-    content_div = soup.find("div", class_="cPost_contentWrap")
-    img_url = None
-    if content_div:
-        img_tag = content_div.find("img")
-        if img_tag and img_tag.get("src"):
-            img_url = img_tag["src"]
-
-    # 1. Locate all attachment links
     attachment_tags = [a for a in soup.find_all("a", href=True) if "attachment.php" in a["href"]]
+
+    parsed_entries = []
 
     for index, a_tag in enumerate(attachment_tags):
         link_href = a_tag["href"]
         link_text = a_tag.get_text(strip=True)
 
-        # Remove site branding from the front while keeping the full filename intact
-        clean_name = domain_removal_regex.sub("", link_text).strip(" -_")
+        clean_name = domain_removal_regex.sub("", link_text)
+        clean_name = mkv_torrent_removal_regex.sub("", clean_name).strip(" -_")
 
-        # 2. Extract corresponding magnet link if present
-        magnet_href = None
-        next_magnet = a_tag.find_next("a", href=re.compile(r"^magnet:\?"))
-        if next_magnet:
-            magnet_href = next_magnet["href"]
+        # Extract true media size from filename (e.g. 1.6GB, 700MB)
+        file_size = extract_media_size(clean_name)
 
-        # 3. Locate corresponding Cyberloom direct link below the attachment
+        # Locate corresponding Cyberloom download button below attachment
         cyberloom_url = None
         next_dl = a_tag.find_next("a", href=re.compile(r"https?://(?:www\.)?cyberloom\.[a-z]+/l/\w+"))
-        
+
         if next_dl:
             if index + 1 < len(attachment_tags):
                 next_attach = attachment_tags[index + 1]
@@ -209,12 +201,12 @@ async def fetch_attachments(page_url):
         parsed_entries.append({
             "name": clean_name,
             "torrent_link": link_href,
-            "magnet": magnet_href,
+            "size": file_size,
             "cyberloom_url": cyberloom_url,
             "direct_links": []
         })
 
-    # 4. Concurrently bypass paired Cyberloom links
+    # Resolve Cyberloom links concurrently
     bypass_tasks = []
     task_indices = []
     for i, entry in enumerate(parsed_entries):
@@ -228,22 +220,43 @@ async def fetch_attachments(page_url):
             if res.get("success") and res.get("links"):
                 parsed_entries[idx]["direct_links"] = res["links"]
 
-    # 5. Build clean database documents without extra size brackets
-    final_torrent_links = []
+    # Post each entry to Telegram with proper caption formatting
     for entry in parsed_entries:
-        final_torrent_links.append({
-            "name": entry["name"],
-            "link": entry["torrent_link"],
-            "magnet": entry["magnet"],
-            "direct_links": entry["direct_links"]
-        })
+        filename = f"@AddaFileZ_{entry['name'].replace(' ', '_')}.torrent"
+        
+        # Build caption with true media size and direct links
+        size_display = f" [{entry['size']}]" if entry['size'] else ""
+        caption = f"<b>@AddaFileZ {entry['name']}{size_display}</b>"
+
+        # Add Direct Download Buttons below the message
+        buttons = []
+        for dl in entry["direct_links"]:
+            buttons.append([InlineKeyboardButton(f"⚡ Direct Link ({dl['name']})", url=dl["link"])])
+
+        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+        caption += "\n\n<b>〽️ Powered by @AddaFileZ</b>"
+
+        try:
+            # Download torrent content and send as document
+            torrent_content = await fetch(entry["torrent_link"])
+            if torrent_content:
+                await User.send_document(
+                    chat_id=GROUP_ID,
+                    document=entry["torrent_link"],
+                    file_name=filename,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode=enums.ParseMode.HTML
+                )
+                await asyncio.sleep(2)
+        except Exception as e:
+            logging.error(f"Error sending document: {e}")
 
     document = {
-        "img_url": img_url,
-        "links": final_torrent_links,
+        "page_url": page_url,
+        "links": parsed_entries,
         "added_on": datetime.utcnow(),
     }
-
     await db.add_document(document)
     return document
 
