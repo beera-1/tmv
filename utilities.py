@@ -1,11 +1,11 @@
 import asyncio
+import io
 import logging
+import re
+import urllib.parse
 import aiohttp
 import cloudscraper
 from bs4 import BeautifulSoup
-import re
-import base64
-import urllib.parse
 from datetime import datetime
 from database import db
 from configs import *
@@ -32,16 +32,11 @@ HTTP_HEADERS = {
 
 async def fetch(url):
     scraper = cloudscraper.create_scraper()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
     loop = asyncio.get_event_loop()
     try:
-        response = await loop.run_in_executor(executor, lambda: scraper.get(url, headers=headers, timeout=20))
+        response = await loop.run_in_executor(
+            executor, lambda: scraper.get(url, headers=HTTP_HEADERS, timeout=20)
+        )
         response.raise_for_status()
         return response.text
     except requests.exceptions.HTTPError as e:
@@ -55,26 +50,26 @@ async def fetch(url):
         return None
 
 
+async def download_file_bytes(url):
+    """Downloads raw torrent binary bytes to bypass Telegram WEBPAGE_MEDIA_EMPTY errors."""
+    scraper = cloudscraper.create_scraper()
+    loop = asyncio.get_event_loop()
+    try:
+        response = await loop.run_in_executor(
+            executor, lambda: scraper.get(url, headers=HTTP_HEADERS, timeout=25)
+        )
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        logging.error(f"Failed to download torrent binary from {url}: {e}")
+        return None
+
+
 # -----------------------------------------------------------
 # SIZE EXTRACTION HELPERS
 # -----------------------------------------------------------
-def get_size_in_bytes(text):
-    if not text:
-        return None
-    text = text.lower()
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb)", text)
-    if not match:
-        return None
-    value = float(match.group(1))
-    unit = match.group(2)
-    if unit == "gb":
-        return int(value * 1024 * 1024 * 1024)
-    else:
-        return int(value * 1024 * 1024)
-
-
 def extract_media_size(text):
-    """Extracts clean media size (e.g., '1.6GB', '700MB') from filename or text."""
+    """Extracts media size (e.g., '10GB', '7.2GB', '850MB') from filename."""
     if not text:
         return ""
     match = re.search(r"(\d+(?:\.\d+)?\s*(?:GB|MB))", text, re.IGNORECASE)
@@ -90,7 +85,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
     async with aiohttp.ClientSession(headers=HTTP_HEADERS, timeout=timeout) as session:
         try:
-            # Step 1: Initial landing fetch
             async with session.get(target_url, allow_redirects=True) as res1:
                 html1 = await res1.text()
                 current_url = str(res1.url)
@@ -98,7 +92,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
             soup1 = BeautifulSoup(html1, "html.parser")
             cta = soup1.find("a", id="cta")
 
-            # Step 2: Handle CTA intermediate redirection if present
             if cta and cta.get("href"):
                 next_url = cta["href"]
                 await asyncio.sleep(1.5)
@@ -108,16 +101,15 @@ async def resolve_cyberloom(start_url: str) -> dict:
             else:
                 html_target = html1
 
-            # Step 3: Decode Base64 destination or continue button
             match = re.search(r"var (?:link|hash)\s*=\s*'([^']+)'", html_target)
             if match:
+                import base64
                 destination_url = base64.b64decode(match.group(1)).decode("utf-8")
             else:
                 soup_target = BeautifulSoup(html_target, "html.parser")
                 cont_btn = soup_target.find("a", id="continue-btn")
                 destination_url = cont_btn["href"] if (cont_btn and cont_btn.get("href")) else current_url
 
-            # Step 4: Access destination file host (MessyCloud) with polling retries
             final_html = ""
             landing_host_url = destination_url
             for attempt in range(3):
@@ -151,7 +143,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
                 final_download_url = None
 
-                # Step 5: Dynamic API Token Expansion with retry polling
                 if token:
                     api_endpoint = f"{base_url}/api/link/{token}"
                     api_headers = {
@@ -200,9 +191,12 @@ async def parse_links(html):
     soup = BeautifulSoup(html, "html.parser")
     links = []
     for link in soup.find_all("a", href=True):
-        if "/index.php?/forums/topic/" in link["href"]:
-            if link["href"] not in links:
-                links.append(link["href"])
+        href = link["href"]
+        if "/index.php?/forums/topic/" in href:
+            # Skip invalid navigation topics like topic/183-0/
+            if re.search(r"topic/\d+-[a-zA-Z0-9-]+", href):
+                if href not in links:
+                    links.append(href)
             if len(links) == 20:
                 break
     return links
@@ -237,7 +231,7 @@ async def fetch_attachments(page_url):
 
         file_size = extract_media_size(clean_name)
 
-        # Locate corresponding Cyberloom download button below the attachment
+        # Pair corresponding cyberloom link located right below this torrent link
         cyberloom_url = None
         next_dl = a_tag.find_next("a", href=re.compile(r"https?://(?:www\.)?(?:cyberloom|inkvoyage)\.[a-z]+/(?:l|out)\b"))
 
@@ -251,13 +245,14 @@ async def fetch_attachments(page_url):
 
         parsed_entries.append({
             "name": clean_name,
+            "link": link_href,
             "torrent_link": link_href,
             "size": file_size,
             "cyberloom_url": cyberloom_url,
             "direct_links": []
         })
 
-    # Concurrently resolve Cyberloom links
+    # Resolve Cyberloom links
     bypass_tasks = []
     task_indices = []
     for i, entry in enumerate(parsed_entries):
@@ -271,13 +266,12 @@ async def fetch_attachments(page_url):
             if res.get("success") and res.get("links"):
                 parsed_entries[idx]["direct_links"] = res["links"]
 
-    # Post each entry to Telegram with proper caption formatting and links
+    # Send each torrent document binary to Telegram
     for entry in parsed_entries:
         filename = f"@AddaFileZ_{entry['name'].replace(' ', '_')}.torrent"
         size_display = f" [{entry['size']}]" if entry['size'] else ""
         caption = f"<b>@AddaFileZ {entry['name']}{size_display}</b>"
 
-        # Direct links placed as buttons
         buttons = []
         for dl in entry["direct_links"]:
             buttons.append([InlineKeyboardButton(f"⚡ Direct Link ({dl['name']})", url=dl["link"])])
@@ -286,22 +280,38 @@ async def fetch_attachments(page_url):
         caption += "\n\n<b>〽️ Powered by @AddaFileZ</b>"
 
         try:
-            await User.send_document(
-                chat_id=GROUP_ID,
-                document=entry["torrent_link"],
-                file_name=filename,
-                caption=caption,
-                reply_markup=reply_markup,
-                parse_mode=enums.ParseMode.HTML
-            )
-            await asyncio.sleep(2)
+            # Download file bytes directly to avoid WEBPAGE_MEDIA_EMPTY
+            torrent_bytes = await download_file_bytes(entry["torrent_link"])
+            if torrent_bytes:
+                file_io = io.BytesIO(torrent_bytes)
+                file_io.name = filename
+
+                await User.send_document(
+                    chat_id=GROUP_ID,
+                    document=file_io,
+                    file_name=filename,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode=enums.ParseMode.HTML
+                )
+                await asyncio.sleep(2)
         except Exception as e:
             logging.error(f"Error sending document: {e}")
+
+    # Standardize links field for database queries
+    db_links = [
+        {
+            "name": entry["name"],
+            "link": entry["link"],
+            "direct_links": entry["direct_links"]
+        }
+        for entry in parsed_entries
+    ]
 
     document = {
         "page_url": page_url,
         "img_url": img_url,
-        "links": parsed_entries,
+        "links": db_links,
         "added_on": datetime.utcnow(),
     }
 
