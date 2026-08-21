@@ -19,10 +19,8 @@ from configs import *
 from database import db
 from utilities import fetch
 
-# Memory storage for user pagination
 user_pagination = {}
 
-# Standard browser headers for web scraping
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -33,7 +31,7 @@ HTTP_HEADERS = {
 
 
 # ==========================================
-# Cyberloom / MessyCloud Bypass Helper
+# Cyberloom / MessyCloud Bypass Engine
 # ==========================================
 async def resolve_cyberloom(start_url: str) -> dict:
     """
@@ -45,14 +43,12 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
     async with aiohttp.ClientSession(headers=HTTP_HEADERS, timeout=timeout) as session:
         try:
-            # Step 1: Request initial landing page
             async with session.get(target_url, allow_redirects=True) as res1:
                 html1 = await res1.text()
 
             soup1 = BeautifulSoup(html1, "html.parser")
             cta = soup1.find("a", id="cta")
 
-            # Check if this page has an immediate intermediate CTA redirect
             if cta and cta.get("href"):
                 next_url = cta["href"]
                 async with session.get(next_url, allow_redirects=True) as res2:
@@ -61,7 +57,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
                 html2 = html1
                 next_url = target_url
 
-            # Step 2: Extract embedded Base64 payload or fallback target
             match = re.search(r"var (?:link|hash)\s*=\s*'([^']+)'", html2)
             if match:
                 decoded_url = base64.b64decode(match.group(1)).decode("utf-8")
@@ -70,7 +65,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
                 cont_btn = soup2.find("a", id="continue-btn")
                 decoded_url = cont_btn["href"] if (cont_btn and cont_btn.get("href")) else next_url
 
-            # Step 3: Fetch final destination host (e.g., MessyCloud)
             async with session.get(decoded_url, allow_redirects=True) as res3:
                 final_html = await res3.text()
                 landing_host_url = str(res3.url)
@@ -79,7 +73,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
             parsed_host = urllib.parse.urlparse(landing_host_url)
             base_url = f"{parsed_host.scheme}://{parsed_host.netloc}"
 
-            # Step 4: Extract Metadata
             raw_title = soup3.find("h1").text.strip() if soup3.find("h1") else "Direct File Download"
             cleaned_title = re.sub(
                 r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", "", raw_title, flags=re.IGNORECASE
@@ -89,8 +82,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
             file_size = size_match.group(1) if size_match else "Unknown Size"
 
             direct_links = []
-
-            # Step 5: Resolve Direct Links & Dynamic Tokens
             for a_tag in soup3.find_all("a"):
                 label = a_tag.get_text(strip=True)
                 token = a_tag.get("data-token")
@@ -100,8 +91,6 @@ async def resolve_cyberloom(start_url: str) -> dict:
                     continue
 
                 final_download_url = None
-
-                # Handle dynamic token API expansion
                 if token:
                     api_endpoint = f"{base_url}/api/link/{token}"
                     api_headers = {
@@ -130,20 +119,20 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
             return {
                 "success": True,
+                "url": start_url,
                 "title": cleaned_title,
                 "size": file_size,
                 "links": direct_links,
             }
 
         except Exception as err:
-            return {"success": False, "error": str(err)}
+            return {"success": False, "url": start_url, "error": str(err)}
 
 
 # ==========================================
 # Chunking & Formatting Output Helper
 # ==========================================
 async def send_split_search_results(client: Client, message: Message, movie_name: str, movie_docs: list):
-    """Formats search results and safely sends them chunked below Telegram character limits."""
     img_url = movie_docs[0].get("img_url", None)
     links = [(doc.get("name"), doc.get("link")) for doc in movie_docs]
 
@@ -161,14 +150,12 @@ async def send_split_search_results(client: Client, message: Message, movie_name
             await message.reply_text(final_msg)
         return
 
-    # Send standalone photo first to avoid caption size truncation
     if img_url:
         try:
             await message.reply_photo(photo=img_url)
         except Exception:
             pass
 
-    # Split links into chunks below Telegram's 4096-character limit (using safety margin: 3800)
     footer = "\n\n<b><blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>"
     chunks = []
     current_chunk = header + "<b>Available Torrent Links:</b>"
@@ -196,7 +183,6 @@ async def send_split_search_results(client: Client, message: Message, movie_name
 async def start_handler(c: Client, m: Message):
     try:
         user_id = m.from_user.id
-
         if not await db.is_present(user_id):
             await db.add_user(user_id)
             await c.send_message(
@@ -219,7 +205,6 @@ async def start_handler(c: Client, m: Message):
                 [InlineKeyboardButton("Cʟᴏsᴇ ❌", callback_data="delete")],
             ]
         )
-
         await m.reply_text(START_TXT.format(m.from_user.mention), reply_markup=keyboard)
     except Exception as e:
         await m.reply_text(f"Error: {e}")
@@ -227,30 +212,51 @@ async def start_handler(c: Client, m: Message):
 
 @Client.on_message(filters.private & filters.command("cb"))
 async def cyberloom_bypass_handler(client: Client, message: Message):
-    """Command /cb <url> to extract direct links from Cyberloom/MessyCloud."""
-    msg_parts = message.text.strip().split(maxsplit=1)
+    """
+    Command /cb <url1> <url2> ...
+    Supports single or multiple space/newline-separated Cyberloom / MessyCloud links.
+    """
+    raw_text = message.text.strip()
+    command_args = raw_text.split(None, 1)
 
-    if len(msg_parts) < 2:
+    if len(command_args) < 2:
         await message.reply_text(
-            "<b>Please provide a valid Cyberloom/MessyCloud link.\n\nUsage:</b> <code>/cb https://www.cyberloom.best/l/...</code>"
+            "<b>Please provide one or more links.</b>\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/cb https://www.cyberloom.best/l/1 https://www.cyberloom.best/l/2</code>"
         )
         return
 
-    url = msg_parts[1].strip()
-    status_msg = await message.reply_text("⚡ <b>Bypassing link, please wait...</b>")
+    # Extract all valid URLs from input
+    urls = re.findall(r"https?://[^\s]+", command_args[1])
+    if not urls:
+        await message.reply_text("❌ <b>No valid URLs found in your message.</b>")
+        return
+
+    status_msg = await message.reply_text(f"⚡ <b>Bypassing {len(urls)} link(s), please wait...</b>")
+
+    # Run bypass concurrently for all extracted links
+    tasks = [resolve_cyberloom(u) for u in urls]
+    results = await asyncio.gather(*tasks)
 
     try:
-        result = await resolve_cyberloom(url)
+        await status_msg.delete()
+    except Exception:
+        pass
 
-        if not result.get("success") or not result.get("links"):
-            await status_msg.edit_text(
-                f"❌ <b>Failed to resolve direct links.</b>\n<code>Reason: {result.get('error', 'No endpoints detected')}</code>"
+    for res in results:
+        if not res.get("success") or not res.get("links"):
+            err_text = (
+                f"❌ <b>Bypass Failed</b>\n"
+                f"🔗 <b>URL:</b> <code>{res.get('url')}</code>\n"
+                f"⚠️ <b>Reason:</b> <code>{res.get('error', 'No endpoints detected')}</code>"
             )
-            return
+            await message.reply_text(err_text)
+            continue
 
-        title = result["title"]
-        size = result["size"]
-        links = result["links"]
+        title = res["title"]
+        size = res["size"]
+        links = res["links"]
 
         caption = (
             f"🎬 <b>File:</b> <code>{title}</code>\n"
@@ -264,10 +270,11 @@ async def cyberloom_bypass_handler(client: Client, message: Message):
 
         buttons.append([InlineKeyboardButton("❌ Close", callback_data="delete")])
 
-        await status_msg.edit_text(caption, reply_markup=InlineKeyboardMarkup(buttons))
-
-    except Exception as e:
-        await status_msg.edit_text(f"❌ <b>Error processing bypass:</b> <code>{e}</code>")
+        await message.reply_text(
+            caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True
+        )
 
 
 @Client.on_message(filters.private & filters.command("total_scraps"))
@@ -283,7 +290,6 @@ async def link_count(c: Client, m: Message):
 @Client.on_message(filters.private & filters.command(["scrap"]))
 async def page_scrap(client: Client, message: Message):
     page_url_msg = message.text.strip()
-
     if not page_url_msg.startswith("/scrap "):
         await message.reply_text("<b>Please use the format: <code>/scrap link</code></b>")
         return
@@ -371,7 +377,6 @@ async def movie_result_2(client: Client, message: Message):
             await send_split_search_results(client, message, movie_name, movie_docs)
         else:
             await message.reply_text(f"<b>Could not find any movie matching '{movie_name}'.</b>")
-
     except Exception as e:
         await message.reply_text(f"Error occurred while searching: {e}")
 
@@ -415,7 +420,6 @@ async def movie_result_1(client: Client, message: Message):
             await send_split_search_results(client, message, movie_name, movie_docs)
         else:
             await message.reply_text(f"<b>Could not find any movie matching '{movie_name}'.</b>")
-
     except Exception as e:
         await message.reply_text(f"Error occurred while searching: {e}")
 
@@ -438,7 +442,7 @@ async def callback_handler(client: Client, query: CallbackQuery):
         help_text = (
             "<b>Bot Commands:</b>\n\n"
             "• <code>/start</code> - Start the bot\n"
-            "• <code>/cb &lt;link&gt;</code> - Bypass Cyberloom / MessyCloud links\n"
+            "• <code>/cb &lt;link1&gt; &lt;link2&gt;</code> - Bypass multiple Cyberloom links\n"
             "• <code>/get &lt;movie name&gt;</code> - Search movie in DB\n"
             "• <code>/scrap &lt;page link&gt;</code> - Extract links from URL\n"
             "• <code>/list</code> - View recent movies\n"
