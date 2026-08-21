@@ -5,6 +5,7 @@ import re
 import urllib.parse
 import aiohttp
 from bs4 import BeautifulSoup
+
 from pyrogram import Client, filters, enums
 from pyrogram.types import (
     InlineKeyboardMarkup,
@@ -21,7 +22,7 @@ from utilities import fetch
 # Memory storage for user pagination
 user_pagination = {}
 
-# Standard browser headers for web requests
+# Standard browser headers for web scraping
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -37,21 +38,21 @@ HTTP_HEADERS = {
 async def resolve_cyberloom(start_url: str) -> dict:
     """
     Follows multi-hop redirects and resolves direct download links
-    from Cyberloom / MessyCloud landing pages.
+    from Cyberloom / Inkvoyage / MessyCloud landing pages.
     """
     target_url = start_url.strip()
     timeout = aiohttp.ClientTimeout(total=20)
 
     async with aiohttp.ClientSession(headers=HTTP_HEADERS, timeout=timeout) as session:
         try:
-            # Step 1: Request initial landing page (Cyberloom/Inkvoyage)
+            # Step 1: Request initial landing page
             async with session.get(target_url, allow_redirects=True) as res1:
                 html1 = await res1.text()
 
             soup1 = BeautifulSoup(html1, "html.parser")
             cta = soup1.find("a", id="cta")
 
-            # Check if this is a direct intermediate page or needs CTA extraction
+            # Check if this page has an immediate intermediate CTA redirect
             if cta and cta.get("href"):
                 next_url = cta["href"]
                 async with session.get(next_url, allow_redirects=True) as res2:
@@ -139,6 +140,55 @@ async def resolve_cyberloom(start_url: str) -> dict:
 
 
 # ==========================================
+# Chunking & Formatting Output Helper
+# ==========================================
+async def send_split_search_results(client: Client, message: Message, movie_name: str, movie_docs: list):
+    """Formats search results and safely sends them chunked below Telegram character limits."""
+    img_url = movie_docs[0].get("img_url", None)
+    links = [(doc.get("name"), doc.get("link")) for doc in movie_docs]
+
+    header = f"<b>Query: {movie_name}</b>\n\n"
+    if img_url:
+        header += f"<b>Image URL:\n<code>{img_url}</code></b>\n\n"
+
+    if not links:
+        final_msg = header + "<b>No links available.</b>\n\n<b><blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>"
+        if img_url:
+            await message.reply_photo(photo=img_url, caption=final_msg[:1024] if len(final_msg) <= 1024 else None)
+            if len(final_msg) > 1024:
+                await message.reply_text(final_msg)
+        else:
+            await message.reply_text(final_msg)
+        return
+
+    # Send standalone photo first to avoid caption size truncation
+    if img_url:
+        try:
+            await message.reply_photo(photo=img_url)
+        except Exception:
+            pass
+
+    # Split links into chunks below Telegram's 4096-character limit (using safety margin: 3800)
+    footer = "\n\n<b><blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>"
+    chunks = []
+    current_chunk = header + "<b>Available Torrent Links:</b>"
+
+    for name, link in links:
+        link_entry = f"<b>\n\n🗳 {name}\n\n🧲 • <code>{BASE_URL + link}</code></b>"
+        if len(current_chunk + link_entry + footer) > 3800:
+            chunks.append(current_chunk)
+            current_chunk = link_entry
+        else:
+            current_chunk += link_entry
+
+    current_chunk += footer
+    chunks.append(current_chunk)
+
+    for part in chunks:
+        await message.reply_text(part)
+
+
+# ==========================================
 # Telegram Bot Handlers
 # ==========================================
 
@@ -177,12 +227,12 @@ async def start_handler(c: Client, m: Message):
 
 @Client.on_message(filters.private & filters.command("cb"))
 async def cyberloom_bypass_handler(client: Client, message: Message):
-    """Bypasses Cyberloom / Inkvoyage / MessyCloud links to get direct download endpoints."""
+    """Command /cb <url> to extract direct links from Cyberloom/MessyCloud."""
     msg_parts = message.text.strip().split(maxsplit=1)
 
     if len(msg_parts) < 2:
         await message.reply_text(
-            "<b>Please provide a Cyberloom/MessyCloud link.\n\nUsage:</b> <code>/cb https://www.cyberloom.best/l/...</code>"
+            "<b>Please provide a valid Cyberloom/MessyCloud link.\n\nUsage:</b> <code>/cb https://www.cyberloom.best/l/...</code>"
         )
         return
 
@@ -194,7 +244,7 @@ async def cyberloom_bypass_handler(client: Client, message: Message):
 
         if not result.get("success") or not result.get("links"):
             await status_msg.edit_text(
-                f"❌ <b>Failed to resolve direct links.</b>\n<code>Reason: {result.get('error', 'No direct endpoints found')}</code>"
+                f"❌ <b>Failed to resolve direct links.</b>\n<code>Reason: {result.get('error', 'No endpoints detected')}</code>"
             )
             return
 
@@ -318,28 +368,7 @@ async def movie_result_2(client: Client, message: Message):
     try:
         movie_docs = await db.search_movie(movie_name)
         if movie_docs:
-            img_url = movie_docs[0].get("img_url", None)
-            links = [(doc.get("name"), doc.get("link")) for doc in movie_docs]
-
-            caption = f"<b>Query: {movie_name}</b>\n\n"
-            if img_url:
-                caption += f"<b>Image URL:\n<code>{img_url}</code></b>\n\n"
-
-            if links:
-                caption += "<b>Available Torrent Links:</b>"
-                for name, link in links:
-                    caption += f"<b>\n\n🗳 {name}\n\n🧲 • <code>{BASE_URL + link}</code></b>"
-            else:
-                caption += "<b>\n\nNo links available.</b>"
-
-            caption += "\n\n<b><blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>"
-
-            if img_url and len(caption) <= 1024:
-                await message.reply_photo(photo=img_url, caption=caption)
-            else:
-                if img_url:
-                    await message.reply_photo(photo=img_url)
-                await message.reply_text(caption)
+            await send_split_search_results(client, message, movie_name, movie_docs)
         else:
             await message.reply_text(f"<b>Could not find any movie matching '{movie_name}'.</b>")
 
@@ -383,28 +412,7 @@ async def movie_result_1(client: Client, message: Message):
     try:
         movie_docs = await db.search_movie(movie_name)
         if movie_docs:
-            img_url = movie_docs[0].get("img_url", None)
-            links = [(doc.get("name"), doc.get("link")) for doc in movie_docs]
-
-            caption = f"<b>Query: {movie_name}</b>\n\n"
-            if img_url:
-                caption += f"<b>Image URL:\n<code>{img_url}</code></b>\n\n"
-
-            if links:
-                caption += "<b>Available Torrent Links:</b>"
-                for name, link in links:
-                    caption += f"<b>\n\n🗳 {name}\n\n🧲 • <code>{BASE_URL + link}</code></b>"
-            else:
-                caption += "<b>\n\nNo links available.</b>"
-
-            caption += "\n\n<b><blockquote>〽️ Powered by @MOVIES_ADDDDA</blockquote></b>"
-
-            if img_url and len(caption) <= 1024:
-                await message.reply_photo(photo=img_url, caption=caption)
-            else:
-                if img_url:
-                    await message.reply_photo(photo=img_url)
-                await message.reply_text(caption)
+            await send_split_search_results(client, message, movie_name, movie_docs)
         else:
             await message.reply_text(f"<b>Could not find any movie matching '{movie_name}'.</b>")
 
@@ -413,7 +421,7 @@ async def movie_result_1(client: Client, message: Message):
 
 
 # ==========================================
-# Callback Handlers & Pagination Helpers
+# Callback Query Handlers & Pagination
 # ==========================================
 
 @Client.on_callback_query()
