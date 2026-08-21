@@ -1,7 +1,11 @@
-import asyncio, logging, aiohttp
-import cloudscraper  # Import CloudScraper
+import asyncio
+import logging
+import aiohttp
+import cloudscraper
 from bs4 import BeautifulSoup
 import re
+import base64
+import urllib.parse
 from datetime import datetime
 from database import db
 from configs import *
@@ -15,8 +19,16 @@ from urllib.parse import urlparse
 message_lock = asyncio.Lock()
 executor = ThreadPoolExecutor()
 
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
 async def fetch(url):
-    scraper = cloudscraper.create_scraper()  # Create a scraper instance to bypass Cloudflare protection
+    scraper = cloudscraper.create_scraper()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
     }
@@ -37,24 +49,119 @@ async def fetch(url):
 
 
 # -----------------------------------------------------------
-# NEW IMPROVED SIZE EXTRACTOR (FROM FILENAME + SPAN)
+# CYBERLOOM / MESSYCLOUD BYPASS ENGINE
+# -----------------------------------------------------------
+async def resolve_cyberloom(start_url: str) -> dict:
+    """
+    Resolves Cyberloom/Inkvoyage/MessyCloud redirect chains
+    and extracts direct download endpoints.
+    """
+    target_url = start_url.strip()
+    timeout = aiohttp.ClientTimeout(total=20)
+
+    async with aiohttp.ClientSession(headers=HTTP_HEADERS, timeout=timeout) as session:
+        try:
+            # Step 1: Initial Landing Request
+            async with session.get(target_url, allow_redirects=True) as res1:
+                html1 = await res1.text()
+
+            soup1 = BeautifulSoup(html1, "html.parser")
+            cta = soup1.find("a", id="cta")
+
+            if cta and cta.get("href"):
+                next_url = cta["href"]
+                async with session.get(next_url, allow_redirects=True) as res2:
+                    html2 = await res2.text()
+            else:
+                html2 = html1
+                next_url = target_url
+
+            # Step 2: Extract Embedded Base64 Payload or Continue Target
+            match = re.search(r"var (?:link|hash)\s*=\s*'([^']+)'", html2)
+            if match:
+                decoded_url = base64.b64decode(match.group(1)).decode("utf-8")
+            else:
+                soup2 = BeautifulSoup(html2, "html.parser")
+                cont_btn = soup2.find("a", id="continue-btn")
+                decoded_url = cont_btn["href"] if (cont_btn and cont_btn.get("href")) else next_url
+
+            # Step 3: Fetch Final Host (MessyCloud / CDN Landing)
+            async with session.get(decoded_url, allow_redirects=True) as res3:
+                final_html = await res3.text()
+                landing_host_url = str(res3.url)
+
+            soup3 = BeautifulSoup(final_html, "html.parser")
+            parsed_host = urllib.parse.urlparse(landing_host_url)
+            base_url = f"{parsed_host.scheme}://{parsed_host.netloc}"
+
+            # Step 4: Extract Metadata
+            raw_title = soup3.find("h1").text.strip() if soup3.find("h1") else "Direct File"
+            cleaned_title = re.sub(
+                r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", "", raw_title, flags=re.IGNORECASE
+            ).strip(" -_")
+
+            size_match = re.search(r"(\d+\.?\d*\s*(?:MB|GB|KB))", final_html)
+            file_size = size_match.group(1) if size_match else "Unknown Size"
+
+            direct_links = []
+
+            # Step 5: Resolve Direct Links & Dynamic Tokens
+            for a_tag in soup3.find_all("a"):
+                label = a_tag.get_text(strip=True)
+                token = a_tag.get("data-token")
+                href = a_tag.get("href", "")
+
+                if not label or any(x in label.lower() for x in ["login", "home", "back", "messycloud"]):
+                    continue
+
+                final_download_url = None
+
+                if token:
+                    api_endpoint = f"{base_url}/api/link/{token}"
+                    api_headers = {
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": landing_host_url,
+                    }
+                    async with session.get(api_endpoint, headers=api_headers) as api_res:
+                        if api_res.status == 200:
+                            api_data = await api_res.json()
+                            if api_data.get("success") and api_data.get("url"):
+                                raw_api_url = api_data["url"]
+                                final_download_url = (
+                                    raw_api_url
+                                    if raw_api_url.startswith("http")
+                                    else f"{base_url}{raw_api_url}"
+                                )
+                                if api_data.get("t"):
+                                    final_download_url += f"&t={api_data['t']}"
+                elif "url=" in href:
+                    final_download_url = urllib.parse.unquote(href.split("url=")[1].split("&")[0])
+                elif href.startswith("http") and "messycloud" not in href:
+                    final_download_url = href
+
+                if final_download_url:
+                    direct_links.append({"name": label, "link": final_download_url})
+
+            return {
+                "success": True,
+                "original_url": start_url,
+                "title": cleaned_title,
+                "size": file_size,
+                "links": direct_links,
+            }
+
+        except Exception as err:
+            return {"success": False, "original_url": start_url, "error": str(err)}
+
+
+# -----------------------------------------------------------
+# SIZE EXTRACTOR
 # -----------------------------------------------------------
 def get_size_in_bytes(text):
-    """
-    Extract sizes like:
-    - 950MB
-    - 1.2GB
-    - 3.4gb
-    - 700mb
-    from BOTH:
-    • <span> tags
-    • Torrent filenames (.mkv.torrent)
-    """
     if not text:
         return None
 
     text = text.lower()
-
     match = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb)", text)
     if not match:
         return None
@@ -90,10 +197,10 @@ async def fetch_attachments(page_url):
     non_episode_regex = re.compile(r"S(\d{1,2})\s*(?:E|EP)?\s*\(?(\d+(?:-\d+))\)?", re.IGNORECASE)
     domain_removal_regex = re.compile(r"\b(www\.[^\s/$.?#].[^\s]*)\b")
     mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$")
-    title_domain_removal_regex = re.compile(r"\b(?:www\.)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,6})\b")
 
     soup = BeautifulSoup(html, "html.parser")
     links = []
+    cyberloom_urls = []
 
     content_div = soup.find("div", class_="cPost_contentWrap")
     img_url = None
@@ -109,11 +216,15 @@ async def fetch_attachments(page_url):
     highest_episode_range = (0, 0)
 
     for link in soup.find_all("a", href=True):
-        if "attachment.php" in link["href"]:
+        href = link["href"]
 
-            # -----------------------------------------------
-            # FIXED: Extract size from span OR filename
-            # -----------------------------------------------
+        # --- AUTO-DETECT CYBERLOOM / MESSYCLOUD LINKS ---
+        if any(d in href for d in ["cyberloom.", "inkvoyage.", "messycloud."]):
+            if href not in cyberloom_urls:
+                cyberloom_urls.append(href)
+
+        # --- TORRENT ATTACHMENTS ---
+        if "attachment.php" in href:
             size_tag = link.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
             size_text = size_tag.text if size_tag else link.get_text(strip=True)
             size_in_bytes = get_size_in_bytes(size_text)
@@ -141,9 +252,9 @@ async def fetch_attachments(page_url):
                 ):
                     highest_season = season_number
                     highest_episode_range = (episode_start, episode_end)
-                    season_based_links = [{"name": clean_link_text, "link": link["href"]}]
+                    season_based_links = [{"name": clean_link_text, "link": href}]
                 elif season_number == highest_season and episode_start <= highest_episode_range[1]:
-                    season_based_links.append({"name": clean_link_text, "link": link["href"]})
+                    season_based_links.append({"name": clean_link_text, "link": href})
 
             # Episode-based parsing
             episode_matches = episode_pattern.findall(link_text)
@@ -152,13 +263,12 @@ async def fetch_attachments(page_url):
                 if size_in_bytes < 4 * 1024 * 1024 * 1024:
                     if current_episode_number > highest_episode_number:
                         highest_episode_number = current_episode_number
-                        highest_episode_links = [{"name": clean_link_text, "link": link["href"]}]
+                        highest_episode_links = [{"name": clean_link_text, "link": href}]
                     elif current_episode_number == highest_episode_number:
-                        highest_episode_links.append({"name": clean_link_text, "link": link["href"]})
+                        highest_episode_links.append({"name": clean_link_text, "link": href})
             else:
-                # General link if size is valid
                 if size_in_bytes < 4 * 1024 * 1024 * 1024:
-                    links.append({"name": clean_link_text, "link": link["href"]})
+                    links.append({"name": clean_link_text, "link": href})
 
     final_links = (
         season_based_links
@@ -166,9 +276,25 @@ async def fetch_attachments(page_url):
         else (highest_episode_links if highest_episode_links else links)
     )
 
+    # --- RESOLVE AUTO-DETECTED DIRECT LINKS ---
+    direct_download_results = []
+    if cyberloom_urls:
+        logging.info(f"Auto-detected {len(cyberloom_urls)} Cyberloom link(s). Resolving direct links...")
+        bypass_tasks = [resolve_cyberloom(u) for u in cyberloom_urls]
+        resolved_results = await asyncio.gather(*bypass_tasks)
+
+        for res in resolved_results:
+            if res.get("success") and res.get("links"):
+                for item in res["links"]:
+                    direct_download_results.append({
+                        "name": f"⚡ Direct [{item['name']}] - {res['title']} ({res['size']})",
+                        "link": item["link"]
+                    })
+
     document = {
         "img_url": img_url,
         "links": final_links,
+        "direct_links": direct_download_results,  # Store direct links in DB document
         "added_on": datetime.utcnow(),
     }
 
