@@ -1,37 +1,28 @@
-import asyncio
-import logging
-import re
-import urllib.parse
-import aiohttp
-import cloudscraper
+import asyncio, logging, aiohttp
+import cloudscraper  # Import CloudScraper
 from bs4 import BeautifulSoup
+import re
 from datetime import datetime
 from database import db
 from configs import *
 from aiohttp import web
+from pyrogram import enums, Client
+import traceback
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
+message_lock = asyncio.Lock()
 executor = ThreadPoolExecutor()
 
-HTTP_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
-
-
 async def fetch(url):
-    scraper = cloudscraper.create_scraper()
+    scraper = cloudscraper.create_scraper()  # Create a scraper instance to bypass Cloudflare protection
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
+    }
     loop = asyncio.get_event_loop()
     try:
-        response = await loop.run_in_executor(
-            executor, lambda: scraper.get(url, headers=HTTP_HEADERS, timeout=20)
-        )
+        response = await loop.run_in_executor(executor, lambda: scraper.get(url, headers=headers))
         response.raise_for_status()
         return response.text
     except requests.exceptions.HTTPError as e:
@@ -45,145 +36,65 @@ async def fetch(url):
         return None
 
 
-def extract_media_size(text):
-    """Extracts media size (e.g., '10GB', '7.2GB', '850MB') from filename."""
+# -----------------------------------------------------------
+# NEW IMPROVED SIZE EXTRACTOR (FROM FILENAME + SPAN)
+# -----------------------------------------------------------
+def get_size_in_bytes(text):
+    """
+    Extract sizes like:
+    - 950MB
+    - 1.2GB
+    - 3.4gb
+    - 700mb
+    from BOTH:
+    • <span> tags
+    • Torrent filenames (.mkv.torrent)
+    """
     if not text:
-        return ""
-    match = re.search(r"(\d+(?:\.\d+)?\s*(?:GB|MB))", text, re.IGNORECASE)
-    return match.group(1).upper() if match else ""
+        return None
 
+    text = text.lower()
 
-async def resolve_cyberloom(start_url: str) -> dict:
-    target_url = start_url.strip()
-    timeout = aiohttp.ClientTimeout(total=35)
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb)", text)
+    if not match:
+        return None
 
-    async with aiohttp.ClientSession(headers=HTTP_HEADERS, timeout=timeout) as session:
-        try:
-            async with session.get(target_url, allow_redirects=True) as res1:
-                html1 = await res1.text()
-                current_url = str(res1.url)
+    value = float(match.group(1))
+    unit = match.group(2)
 
-            soup1 = BeautifulSoup(html1, "html.parser")
-            cta = soup1.find("a", id="cta")
-
-            if cta and cta.get("href"):
-                next_url = cta["href"]
-                await asyncio.sleep(1.5)
-                async with session.get(next_url, allow_redirects=True) as res2:
-                    html_target = await res2.text()
-                    current_url = str(res2.url)
-            else:
-                html_target = html1
-
-            match = re.search(r"var (?:link|hash)\s*=\s*'([^']+)'", html_target)
-            if match:
-                import base64
-                destination_url = base64.b64decode(match.group(1)).decode("utf-8")
-            else:
-                soup_target = BeautifulSoup(html_target, "html.parser")
-                cont_btn = soup_target.find("a", id="continue-btn")
-                destination_url = cont_btn["href"] if (cont_btn and cont_btn.get("href")) else current_url
-
-            final_html = ""
-            landing_host_url = destination_url
-            for _ in range(3):
-                async with session.get(destination_url, allow_redirects=True) as res3:
-                    final_html = await res3.text()
-                    landing_host_url = str(res3.url)
-                if "download-grid" in final_html or "data-token" in final_html or "cdn." in final_html:
-                    break
-                await asyncio.sleep(1.5)
-
-            soup3 = BeautifulSoup(final_html, "html.parser")
-            parsed_host = urllib.parse.urlparse(landing_host_url)
-            base_url = f"{parsed_host.scheme}://{parsed_host.netloc}"
-
-            raw_title = soup3.find("h1").text.strip() if soup3.find("h1") else "Direct File"
-            cleaned_title = re.sub(
-                r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", "", raw_title, flags=re.IGNORECASE
-            ).strip(" -_")
-
-            size_match = re.search(r"(\d+\.?\d*\s*(?:MB|GB|KB))", final_html)
-            file_size = size_match.group(1) if size_match else "N/A"
-
-            direct_links = []
-            for a_tag in soup3.find_all("a"):
-                label = a_tag.get_text(strip=True)
-                token = a_tag.get("data-token")
-                href = a_tag.get("href", "")
-
-                if not label or any(x in label.lower() for x in ["login", "home", "back", "messycloud"]):
-                    continue
-
-                final_download_url = None
-
-                if token:
-                    api_endpoint = f"{base_url}/api/link/{token}"
-                    api_headers = {
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Referer": landing_host_url,
-                    }
-                    for _ in range(3):
-                        async with session.get(api_endpoint, headers=api_headers) as api_res:
-                            if api_res.status == 200:
-                                api_data = await api_res.json()
-                                if api_data.get("success") and api_data.get("url"):
-                                    raw_api_url = api_data["url"]
-                                    final_download_url = (
-                                        raw_api_url
-                                        if raw_api_url.startswith("http")
-                                        else f"{base_url}{raw_api_url}"
-                                    )
-                                    if api_data.get("t"):
-                                        final_download_url += f"&t={api_data['t']}"
-                                    break
-                        await asyncio.sleep(1.5)
-                elif "url=" in href:
-                    final_download_url = urllib.parse.unquote(href.split("url=")[1].split("&")[0])
-                elif href.startswith("http") and "messycloud" not in href:
-                    final_download_url = href
-
-                if final_download_url:
-                    direct_links.append({"name": label, "link": final_download_url})
-
-            return {
-                "success": True,
-                "title": cleaned_title,
-                "size": file_size,
-                "links": direct_links,
-            }
-
-        except Exception as err:
-            return {"success": False, "error": str(err)}
+    if unit == "gb":
+        return int(value * 1024 * 1024 * 1024)
+    else:
+        return int(value * 1024 * 1024)
 
 
 async def parse_links(html):
     soup = BeautifulSoup(html, "html.parser")
     links = []
     for link in soup.find_all("a", href=True):
-        href = link["href"]
-        if "/index.php?/forums/topic/" in href:
-            if re.search(r"topic/\d{4,}-[a-zA-Z0-9-]+", href):
-                if href not in links:
-                    links.append(href)
+        if "/index.php?/forums/topic/" in link["href"]:
+            if link["href"] not in links:
+                links.append(link["href"])
             if len(links) == 20:
                 break
     return links
 
 
 async def fetch_attachments(page_url):
-    # Skip if page is already indexed in DB
-    if await db.is_movie_present(page_url):
-        return None
-
     html = await fetch(page_url)
     if not html:
+        logging.warning(f"No content fetched from {page_url}, skipping.")
         return None
 
-    domain_removal_regex = re.compile(r"^www\.[a-zA-Z0-9-]+\.[a-z]+\s*[-_]*\s*", re.IGNORECASE)
-    mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$", re.IGNORECASE)
+    episode_pattern = re.compile(r"E(?:P)?(\d{1,2})", re.IGNORECASE)
+    non_episode_regex = re.compile(r"S(\d{1,2})\s*(?:E|EP)?\s*\(?(\d+(?:-\d+))\)?", re.IGNORECASE)
+    domain_removal_regex = re.compile(r"\b(www\.[^\s/$.?#].[^\s]*)\b")
+    mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$")
+    title_domain_removal_regex = re.compile(r"\b(?:www\.)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,6})\b")
 
     soup = BeautifulSoup(html, "html.parser")
+    links = []
+
     content_div = soup.find("div", class_="cPost_contentWrap")
     img_url = None
     if content_div:
@@ -191,70 +102,76 @@ async def fetch_attachments(page_url):
         if img_tag and img_tag.get("src"):
             img_url = img_tag["src"]
 
-    attachment_tags = [a for a in soup.find_all("a", href=True) if "attachment.php" in a["href"]]
-    if not attachment_tags:
-        return None
+    highest_episode_number = 0
+    highest_episode_links = []
+    season_based_links = []
+    highest_season = 0
+    highest_episode_range = (0, 0)
 
-    parsed_entries = []
-    for index, a_tag in enumerate(attachment_tags):
-        link_href = a_tag["href"]
-        link_text = a_tag.get_text(strip=True)
+    for link in soup.find_all("a", href=True):
+        if "attachment.php" in link["href"]:
 
-        clean_name = domain_removal_regex.sub("", link_text)
-        clean_name = mkv_torrent_removal_regex.sub("", clean_name).strip(" -_")
+            # -----------------------------------------------
+            # FIXED: Extract size from span OR filename
+            # -----------------------------------------------
+            size_tag = link.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
+            size_text = size_tag.text if size_tag else link.get_text(strip=True)
+            size_in_bytes = get_size_in_bytes(size_text)
 
-        file_size = extract_media_size(clean_name)
+            link_text = link.get_text(strip=True)
+            clean_link_text = domain_removal_regex.sub("", link_text)
+            clean_link_text = mkv_torrent_removal_regex.sub("", clean_link_text).strip()
 
-        cyberloom_url = None
-        next_dl = a_tag.find_next("a", href=re.compile(r"https?://(?:www\.)?(?:cyberloom|inkvoyage)\.[a-z]+/(?:l|out)\b"))
+            if size_in_bytes is None:
+                logging.info(f"Skipping link with invalid size: {link_text}")
+                continue
 
-        if next_dl:
-            if index + 1 < len(attachment_tags):
-                next_attach = attachment_tags[index + 1]
-                if next_dl.sourceline is None or next_attach.sourceline is None or next_dl.sourceline < next_attach.sourceline:
-                    cyberloom_url = next_dl["href"]
+            # Season-based parsing
+            season_match = non_episode_regex.search(link_text)
+            if season_match:
+                season_number = int(season_match.group(1))
+                episode_range = season_match.group(2)
+                if "-" in episode_range:
+                    episode_start, episode_end = map(int, episode_range.split("-"))
+                else:
+                    episode_start = episode_end = int(episode_range)
+
+                if season_number > highest_season or (
+                    season_number == highest_season and episode_end > highest_episode_range[1]
+                ):
+                    highest_season = season_number
+                    highest_episode_range = (episode_start, episode_end)
+                    season_based_links = [{"name": clean_link_text, "link": link["href"]}]
+                elif season_number == highest_season and episode_start <= highest_episode_range[1]:
+                    season_based_links.append({"name": clean_link_text, "link": link["href"]})
+
+            # Episode-based parsing
+            episode_matches = episode_pattern.findall(link_text)
+            if episode_matches:
+                current_episode_number = max(int(ep) for ep in episode_matches)
+                if size_in_bytes < 4 * 1024 * 1024 * 1024:
+                    if current_episode_number > highest_episode_number:
+                        highest_episode_number = current_episode_number
+                        highest_episode_links = [{"name": clean_link_text, "link": link["href"]}]
+                    elif current_episode_number == highest_episode_number:
+                        highest_episode_links.append({"name": clean_link_text, "link": link["href"]})
             else:
-                cyberloom_url = next_dl["href"]
+                # General link if size is valid
+                if size_in_bytes < 4 * 1024 * 1024 * 1024:
+                    links.append({"name": clean_link_text, "link": link["href"]})
 
-        parsed_entries.append({
-            "name": clean_name,
-            "link": link_href,
-            "size": file_size,
-            "cyberloom_url": cyberloom_url,
-            "direct_links": []
-        })
-
-    # Resolve direct links concurrently
-    bypass_tasks = []
-    task_indices = []
-    for i, entry in enumerate(parsed_entries):
-        if entry["cyberloom_url"]:
-            bypass_tasks.append(resolve_cyberloom(entry["cyberloom_url"]))
-            task_indices.append(i)
-
-    if bypass_tasks:
-        results = await asyncio.gather(*bypass_tasks)
-        for idx, res in zip(task_indices, results):
-            if res.get("success") and res.get("links"):
-                parsed_entries[idx]["direct_links"] = res["links"]
-
-    db_links = [
-        {
-            "name": entry["name"],
-            "link": entry["link"],
-            "direct_links": entry["direct_links"]
-        }
-        for entry in parsed_entries
-    ]
+    final_links = (
+        season_based_links
+        if season_based_links
+        else (highest_episode_links if highest_episode_links else links)
+    )
 
     document = {
-        "page_url": page_url,
         "img_url": img_url,
-        "links": db_links,
+        "links": final_links,
         "added_on": datetime.utcnow(),
     }
 
-    # DB handles single delivery without duplication
     await db.add_document(document)
     return document
 
@@ -264,7 +181,10 @@ async def start_processing():
     if main_page_html:
         fetched_links = await parse_links(main_page_html)
         for li_link in fetched_links:
+            logging.info(f"Fetching attachments from {li_link}")
             await fetch_attachments(li_link)
+    else:
+        logging.warning("No content found on the main page!")
 
 
 routes = web.RouteTableDef()
@@ -280,21 +200,41 @@ async def web_server():
     return web_app
 
 
+User = Client(
+    "User", session_string=USER_SESSION_STRING, api_hash=API_HASH, api_id=API_ID
+)
+
+
 async def ping_server():
     while True:
         try:
             await start_processing()
         except Exception as e:
-            logging.error(f"Periodic crawl error: {str(e)}")
-        await asyncio.sleep(120)
+            logging.error(f"Unexpected error: {str(e)}")
+        await asyncio.sleep(60)
 
 
 async def ping_main_server():
+    try:
+        await User.start()
+        logging.info("User Session started.")
+        await User.send_message(GROUP_ID, "User Session Started")
+    except Exception as e:
+        logging.error(f"Error Starting User: {str(e)}")
+
     while True:
         await asyncio.sleep(250)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 async with session.get(SERVER_URL) as resp:
-                    logging.info(f"Pinged server with response: {resp.status}")
+                    logging.info("Pinged server with response: {}".format(resp.status))
+        except TimeoutError:
+            logging.warning("Couldn't connect to the site URL.")
         except Exception:
-            pass
+            traceback.print_exc()
+
+
+async def stop_user():
+    await User.send_message(GROUP_ID, "User Session Stopped")
+    await User.stop()
+    logging.info("User Session Stopped.")
