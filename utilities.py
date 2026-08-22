@@ -1,28 +1,35 @@
-import asyncio, logging, aiohttp
-import cloudscraper  # Import CloudScraper
-from bs4 import BeautifulSoup
+import asyncio
+import logging
 import re
-from datetime import datetime
-from database import db
-from configs import *
-from aiohttp import web
-from pyrogram import enums, Client
 import traceback
-import requests
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from urllib.parse import urlparse
+
+import aiohttp
+from aiohttp import web
+from bs4 import BeautifulSoup
+import cloudscraper
+from pyrogram import Client, enums
+import requests
+
+from configs import *
+from database import db
 
 message_lock = asyncio.Lock()
 executor = ThreadPoolExecutor()
 
+
 async def fetch(url):
-    scraper = cloudscraper.create_scraper()  # Create a scraper instance to bypass Cloudflare protection
+    scraper = cloudscraper.create_scraper()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
     }
     loop = asyncio.get_event_loop()
     try:
-        response = await loop.run_in_executor(executor, lambda: scraper.get(url, headers=headers))
+        response = await loop.run_in_executor(
+            executor, lambda: scraper.get(url, headers=headers)
+        )
         response.raise_for_status()
         return response.text
     except requests.exceptions.HTTPError as e:
@@ -36,25 +43,11 @@ async def fetch(url):
         return None
 
 
-# -----------------------------------------------------------
-# NEW IMPROVED SIZE EXTRACTOR (FROM FILENAME + SPAN)
-# -----------------------------------------------------------
 def get_size_in_bytes(text):
-    """
-    Extract sizes like:
-    - 950MB
-    - 1.2GB
-    - 3.4gb
-    - 700mb
-    from BOTH:
-    • <span> tags
-    • Torrent filenames (.mkv.torrent)
-    """
     if not text:
         return None
 
     text = text.lower()
-
     match = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb)", text)
     if not match:
         return None
@@ -87,13 +80,14 @@ async def fetch_attachments(page_url):
         return None
 
     episode_pattern = re.compile(r"E(?:P)?(\d{1,2})", re.IGNORECASE)
-    non_episode_regex = re.compile(r"S(\d{1,2})\s*(?:E|EP)?\s*\(?(\d+(?:-\d+))\)?", re.IGNORECASE)
-    domain_removal_regex = re.compile(r"\b(www\.[^\s/$.?#].[^\s]*)\b")
-    mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$")
-    title_domain_removal_regex = re.compile(r"\b(?:www\.)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,6})\b")
+    non_episode_regex = re.compile(
+        r"S(\d{1,2})\s*(?:E|EP)?\s*\(?(\d+(?:-\d+))\)?", re.IGNORECASE
+    )
+    domain_removal_regex = re.compile(r"\b(?:www\.)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}\b")
+    mkv_torrent_removal_regex = re.compile(r"\.mkv\.torrent$", re.IGNORECASE)
 
     soup = BeautifulSoup(html, "html.parser")
-    links = []
+    all_qualities = []
 
     content_div = soup.find("div", class_="cPost_contentWrap")
     img_url = None
@@ -109,24 +103,27 @@ async def fetch_attachments(page_url):
     highest_episode_range = (0, 0)
 
     for link in soup.find_all("a", href=True):
-        if "attachment.php" in link["href"]:
+        href = link["href"]
+        if "attachment.php" in href:
+            link_text = link.get_text(strip=True)
 
-            # -----------------------------------------------
-            # FIXED: Extract size from span OR filename
-            # -----------------------------------------------
-            size_tag = link.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
-            size_text = size_tag.text if size_tag else link.get_text(strip=True)
+            # Look for size tag nearby or in link text
+            size_tag = link.find_next(
+                "span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I)
+            )
+            size_text = size_tag.text if size_tag else link_text
             size_in_bytes = get_size_in_bytes(size_text)
 
-            link_text = link.get_text(strip=True)
             clean_link_text = domain_removal_regex.sub("", link_text)
-            clean_link_text = mkv_torrent_removal_regex.sub("", clean_link_text).strip()
+            clean_link_text = mkv_torrent_removal_regex.sub("", clean_link_text).strip(" -_")
 
-            if size_in_bytes is None:
-                logging.info(f"Skipping link with invalid size: {link_text}")
-                continue
+            item = {
+                "name": clean_link_text,
+                "link": href,
+                "size_bytes": size_in_bytes,
+            }
 
-            # Season-based parsing
+            # TV Show Season Batch parsing
             season_match = non_episode_regex.search(link_text)
             if season_match:
                 season_number = int(season_match.group(1))
@@ -141,30 +138,31 @@ async def fetch_attachments(page_url):
                 ):
                     highest_season = season_number
                     highest_episode_range = (episode_start, episode_end)
-                    season_based_links = [{"name": clean_link_text, "link": link["href"]}]
+                    season_based_links = [item]
                 elif season_number == highest_season and episode_start <= highest_episode_range[1]:
-                    season_based_links.append({"name": clean_link_text, "link": link["href"]})
+                    season_based_links.append(item)
+                continue
 
-            # Episode-based parsing
+            # TV Show Single Episode parsing
             episode_matches = episode_pattern.findall(link_text)
             if episode_matches:
                 current_episode_number = max(int(ep) for ep in episode_matches)
-                if size_in_bytes < 4 * 1024 * 1024 * 1024:
-                    if current_episode_number > highest_episode_number:
-                        highest_episode_number = current_episode_number
-                        highest_episode_links = [{"name": clean_link_text, "link": link["href"]}]
-                    elif current_episode_number == highest_episode_number:
-                        highest_episode_links.append({"name": clean_link_text, "link": link["href"]})
-            else:
-                # General link if size is valid
-                if size_in_bytes < 4 * 1024 * 1024 * 1024:
-                    links.append({"name": clean_link_text, "link": link["href"]})
+                if current_episode_number > highest_episode_number:
+                    highest_episode_number = current_episode_number
+                    highest_episode_links = [item]
+                elif current_episode_number == highest_episode_number:
+                    highest_episode_links.append(item)
+                continue
 
-    final_links = (
-        season_based_links
-        if season_based_links
-        else (highest_episode_links if highest_episode_links else links)
-    )
+            # Collect all movie quality files (4K, 1080p, 720p, 400MB, etc.) without arbitrary size limits
+            all_qualities.append(item)
+
+    if season_based_links:
+        final_links = season_based_links
+    elif highest_episode_links:
+        final_links = highest_episode_links
+    else:
+        final_links = all_qualities
 
     document = {
         "img_url": img_url,
@@ -188,6 +186,7 @@ async def start_processing():
 
 
 routes = web.RouteTableDef()
+
 
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
@@ -225,9 +224,11 @@ async def ping_main_server():
     while True:
         await asyncio.sleep(250)
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as session:
                 async with session.get(SERVER_URL) as resp:
-                    logging.info("Pinged server with response: {}".format(resp.status))
+                    logging.info(f"Pinged server with response: {resp.status}")
         except TimeoutError:
             logging.warning("Couldn't connect to the site URL.")
         except Exception:
