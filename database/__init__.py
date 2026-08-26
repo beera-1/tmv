@@ -3,11 +3,11 @@ import re
 import asyncio
 import logging
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 import cloudscraper
 import requests
-from pyrogram import Client, enums
+from pyrogram import Client
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from configs import *
@@ -116,8 +116,7 @@ async def download_file(url, local_filename):
                     local_filename
                 )
 
-                # If server does not provide Content-Length,
-                # accept the downloaded file.
+                # Some servers don't provide Content-Length.
                 if (
                     expected_size == 0
                     or actual_size == expected_size
@@ -130,21 +129,15 @@ async def download_file(url, local_filename):
 
                     return True
 
-                else:
+                logging.warning(
+                    f"❌ Size mismatch. "
+                    f"Expected: {expected_size}, "
+                    f"Downloaded: {actual_size}. "
+                    f"Retrying..."
+                )
 
-                    logging.warning(
-                        f"❌ Size mismatch. "
-                        f"Expected: {expected_size}, "
-                        f"Downloaded: {actual_size}. "
-                        f"Retrying..."
-                    )
-
-                    if os.path.exists(
-                        local_filename
-                    ):
-                        os.remove(
-                            local_filename
-                        )
+                if os.path.exists(local_filename):
+                    os.remove(local_filename)
 
             else:
 
@@ -172,39 +165,59 @@ async def download_file(url, local_filename):
 
 
 # ============================================================
-# CLEAN CAPTION NAME
+# CLEAN TORRENT NAME
 # ============================================================
 
-def clean_caption_name(name):
+def clean_filename(name):
     """
-    Removes only torrent/file extensions from the caption.
+    Cleans the scraped torrent name.
 
     IMPORTANT:
-    @AddaFileZ prefix is NOT removed here.
+    @AddaFileZ prefix is always preserved/added.
     """
 
     if not name:
-        return ""
+        name = "Unknown"
 
-    name = str(name).strip()
+    # Decode URL encoded names.
+    name = unquote(
+        str(name).strip()
+    )
 
-    # Remove .mkv.torrent
+    # Remove unwanted website/domain prefixes ONLY.
+    # @AddaFileZ is NOT removed.
     name = re.sub(
-        r"\.mkv\.torrent$",
+        r"^\s*(?:www\.)?[^-\s]+(?:\.com|\.net|\.in|\.org)[\s-]*",
         "",
         name,
         flags=re.IGNORECASE
     )
 
-    # Remove .torrent
+    # Remove invalid filesystem characters.
     name = re.sub(
-        r"\.torrent$",
-        "",
-        name,
-        flags=re.IGNORECASE
+        r'[\\/*?:"<>|]',
+        "_",
+        name
     )
 
-    return name.strip()
+    name = name.strip()
+
+    # Make sure torrent extension exists.
+    if not name.lower().endswith(".torrent"):
+        name += ".torrent"
+
+    # ========================================================
+    # KEEP YOUR OLD PREFIX
+    # ========================================================
+
+    prefix = "@AddaFileZ"
+
+    if not name.lower().startswith(
+        prefix.lower()
+    ):
+        name = f"{prefix} - {name}"
+
+    return name
 
 
 # ============================================================
@@ -226,133 +239,137 @@ async def send_new_link_notification(links):
 
         for link in links:
 
-            # ====================================================
-            # DO NOT CHANGE THIS
-            # YOUR OLD @AddaFileZ PREFIX IS KEPT
-            # ====================================================
+            # =================================================
+            # BUILD FINAL TORRENT FILENAME
+            # =================================================
 
-            local_filename = (
-                f"downloads/@AddaFileZ "
-                f"{link['name']}.torrent"
+            filename = clean_filename(
+                link["name"]
             )
 
-            # ====================================================
-            # CHECK LINK
-            # ====================================================
+            local_filename = os.path.join(
+                "downloads",
+                filename
+            )
 
-            if await is_valid_link(
+            # =================================================
+            # CHECK LINK
+            # =================================================
+
+            if not await is_valid_link(
                 link["link"]
             ):
-
-                # =================================================
-                # DOWNLOAD TORRENT
-                # =================================================
-
-                if await download_file(
-                    link["link"],
-                    local_filename
-                ):
-
-                    try:
-
-                        # ==========================================
-                        # CLEAN ONLY THE CAPTION NAME
-                        # ==========================================
-
-                        movie_name = clean_caption_name(
-                            link["name"]
-                        )
-
-                        # ==========================================
-                        # EXACT CAPTION FORMAT
-                        # ==========================================
-
-                        caption = (
-                            f"<b>"
-                            f"@AddaFileZ - {movie_name}"
-                            f"\n\n"
-                            f"#Movies #1TMV"
-                            f"\n\n"
-                            f"Powered By ✨ @AddaFileZ"
-                            f"</b>"
-                        )
-
-                        # ==========================================
-                        # SEND TO GROUP
-                        # ==========================================
-
-                        sent_msg = await User.send_document(
-                            chat_id=GROUP_ID,
-                            document=local_filename,
-                            thumb="database/thumb.jpg",
-                            caption=caption,
-                            parse_mode=enums.ParseMode.HTML,
-                        )
-
-                        # ==========================================
-                        # TRIGGER COMMAND
-                        # ==========================================
-
-                        await User.send_message(
-                            chat_id=GROUP_ID,
-                            text="/qbleech1",
-                            reply_to_message_id=sent_msg.id,
-                        )
-
-                        # ==========================================
-                        # SEND TO RSS CHAT
-                        # ==========================================
-
-                        await User.send_document(
-                            chat_id=RSS_CHAT,
-                            document=local_filename,
-                            thumb="database/thumb.jpg",
-                            caption=caption,
-                            parse_mode=enums.ParseMode.HTML,
-                        )
-
-                    except Exception as e:
-
-                        logging.error(
-                            f"[send_document] Error: {e}",
-                            exc_info=True
-                        )
-
-                    finally:
-
-                        # ==========================================
-                        # REMOVE DOWNLOADED FILE
-                        # ==========================================
-
-                        if os.path.exists(
-                            local_filename
-                        ):
-
-                            try:
-                                os.remove(
-                                    local_filename
-                                )
-
-                            except Exception as e:
-
-                                logging.warning(
-                                    f"Could not remove "
-                                    f"{local_filename}: {e}"
-                                )
-
-                else:
-
-                    logging.warning(
-                        f"⚠️ Failed to download: "
-                        f"{link['link']}"
-                    )
-
-            else:
 
                 logging.warning(
                     f"⚠️ Invalid link skipped: "
                     f"{link['link']}"
                 )
+
+                continue
+
+            # =================================================
+            # DOWNLOAD TORRENT
+            # =================================================
+
+            if not await download_file(
+                link["link"],
+                local_filename
+            ):
+
+                logging.warning(
+                    f"⚠️ Failed to download: "
+                    f"{link['link']}"
+                )
+
+                continue
+
+            try:
+
+                # =================================================
+                # SAME STYLE AS YOUR WORKING CODE
+                #
+                # Caption uses the actual filename.
+                # This preserves @AddaFileZ automatically.
+                # =================================================
+
+                clean_name = os.path.basename(
+                    local_filename
+                )
+
+                caption = (
+                    f"<b>{clean_name}"
+                    f"\n\n"
+                    f"#Movies #1TMV"
+                    f"\n\n"
+                    f"Powered By ✨ @AddaFileZ"
+                    f"</b>"
+                )
+
+                # =================================================
+                # SEND TO GROUP
+                # =================================================
+
+                sent_msg = await User.send_document(
+                    chat_id=GROUP_ID,
+                    document=local_filename,
+                    thumb="database/thumb.jpg",
+                    caption=caption,
+                )
+
+                # =================================================
+                # TRIGGER COMMAND
+                # =================================================
+
+                await User.send_message(
+                    chat_id=GROUP_ID,
+                    text="/qbleech1",
+                    reply_to_message_id=sent_msg.id,
+                )
+
+                # =================================================
+                # SEND TO RSS CHAT
+                # =================================================
+
+                await User.send_document(
+                    chat_id=RSS_CHAT,
+                    document=local_filename,
+                    thumb="database/thumb.jpg",
+                    caption=caption,
+                )
+
+                logging.info(
+                    f"✅ Sent: {clean_name}"
+                )
+
+            except Exception as e:
+
+                logging.error(
+                    f"[send_document] Error: {e}",
+                    exc_info=True
+                )
+
+            finally:
+
+                # =================================================
+                # DELETE LOCAL TORRENT
+                # =================================================
+
+                if os.path.exists(
+                    local_filename
+                ):
+
+                    try:
+
+                        os.remove(
+                            local_filename
+                        )
+
+                    except Exception as e:
+
+                        logging.warning(
+                            f"Could not remove "
+                            f"{local_filename}: {e}"
+                        )
 
 
 # ============================================================
@@ -516,43 +533,49 @@ class Database:
                 )
             )
 
-            # ====================================================
+            # =================================================
             # CHECK DUPLICATE
-            # ====================================================
+            # =================================================
 
-            if not await self.links_coll.find_one(
+            if await self.links_coll.find_one(
                 {
                     "link": link_path
                 }
             ):
 
-                new_doc = {
-                    "img_url": img_url,
-                    "name": link["name"],
-                    "link": link_path,
-                    "added_on": datetime.utcnow(),
-                }
+                continue
 
-                await self.links_coll.insert_one(
-                    new_doc
-                )
+            # =================================================
+            # STORE DOCUMENT
+            # =================================================
 
-                logging.info(
-                    f"[DB] New document inserted: "
-                    f"{new_doc['name']}"
-                )
+            new_doc = {
+                "img_url": img_url,
+                "name": link["name"],
+                "link": link_path,
+                "added_on": datetime.utcnow(),
+            }
 
-                # =================================================
-                # SEND TELEGRAM NOTIFICATION
-                # =================================================
+            await self.links_coll.insert_one(
+                new_doc
+            )
 
-                await send_new_link_notification(
-                    [link]
-                )
+            logging.info(
+                f"[DB] New document inserted: "
+                f"{new_doc['name']}"
+            )
+
+            # =================================================
+            # SEND TELEGRAM NOTIFICATION
+            # =================================================
+
+            await send_new_link_notification(
+                [link]
+            )
 
 
 # ============================================================
-# GLOBAL DB INSTANCE
+# GLOBAL DATABASE INSTANCE
 # ============================================================
 
 db = Database(
