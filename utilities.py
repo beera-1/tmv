@@ -2,79 +2,48 @@ import asyncio
 import logging
 import re
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import aiohttp
 from aiohttp import web
 from bs4 import BeautifulSoup
 import cloudscraper
 from pyrogram import Client
-import requests
 
 from configs import *
 from database import db
 
 
 # ============================================================
-# GLOBALS
+# GLOBALS & CONSTANTS
 # ============================================================
 
-message_lock = asyncio.Lock()
-executor = ThreadPoolExecutor()
+scraper = cloudscraper.create_scraper(delay=10, browser="chrome")
 
-# Regex pattern matching valid topic slugs with letters (excludes '183-0/' pagination)
-TOPIC_REGEX = re.compile(r"/index\.php\?/forums/topic/\d+-[a-zA-Z0-9]", re.IGNORECASE)
-
-
-# ============================================================
-# FETCH PAGE
-# ============================================================
-
-async def fetch(url):
-    scraper = cloudscraper.create_scraper()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/113.0.0.0 Safari/537.36"
-        )
-    }
-
-    loop = asyncio.get_event_loop()
-
-    try:
-        response = await loop.run_in_executor(
-            executor,
-            lambda: scraper.get(
-                url,
-                headers=headers,
-                timeout=30
-            )
-        )
-        response.raise_for_status()
-        return response.text
-
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            logging.warning(f"Page not found (404): {url}")
-        else:
-            logging.error(f"HTTP error fetching {url}: {e}")
-        return None
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching {url}: {e}")
-        return None
-
-    except Exception as e:
-        logging.error(f"Unexpected error fetching {url}: {e}", exc_info=True)
-        return None
+# Strictly matches valid forum release threads (5+ digit IDs)
+# Explicitly rejects index/pagination links such as '183-0/'
+TOPIC_REGEX = re.compile(r"/index\.php\?/forums/topic/([1-9]\d{4,})-([^/]+)", re.IGNORECASE)
 
 
 # ============================================================
-# SIZE PARSER
+# UTILITIES & CATEGORIZATION
 # ============================================================
+
+def fix_url(href: str) -> str:
+    return href if href.startswith("http") else urljoin(BASE_URL, href)
+
+
+def categorize_content(title: str) -> str:
+    t = title.lower()
+    series_patterns = [r"s\d{1,2}", r"ep\s?\d+", r"episode", r"season", r"complete"]
+
+    if any(re.search(p, t) for p in series_patterns) or "web series" in t or "tv show" in t:
+        return "Series"
+    if "dubbed" in t or "tam+" in t or "multi" in t:
+        return "Dubbed"
+    return "Movies"
+
 
 def get_size_in_bytes(text):
     if not text:
@@ -82,17 +51,31 @@ def get_size_in_bytes(text):
 
     text = str(text).lower()
     match = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb)", text)
-
     if not match:
         return None
 
     value = float(match.group(1))
     unit = match.group(2)
-
     if unit == "gb":
         return int(value * 1024 * 1024 * 1024)
-
     return int(value * 1024 * 1024)
+
+
+# ============================================================
+# FETCH PAGE
+# ============================================================
+
+async def fetch(url):
+    try:
+        response = await asyncio.to_thread(scraper.get, url, timeout=30)
+        if response.status_code == 404:
+            logging.warning(f"Page not found (404): {url}")
+            return None
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        logging.error(f"Error fetching {url}: {e}")
+        return None
 
 
 # ============================================================
@@ -105,13 +88,10 @@ async def parse_links(html):
 
     for link in soup.find_all("a", href=True):
         href = link["href"]
-
-        # Only capture real content topics, filtering out pagination pages like 183-0/
         if TOPIC_REGEX.search(href):
-            clean_href = href.split("&")[0]
+            clean_href = fix_url(href.split("&")[0].rstrip("/"))
             if clean_href not in links:
                 links.append(clean_href)
-
             if len(links) == 20:
                 break
 
@@ -124,9 +104,7 @@ async def parse_links(html):
 
 async def fetch_attachments(page_url):
     html = await fetch(page_url)
-
     if not html:
-        logging.warning(f"No content fetched from {page_url}, skipping.")
         return None
 
     episode_pattern = re.compile(r"E(?:P)?(\d{1,2})", re.IGNORECASE)
@@ -138,7 +116,6 @@ async def fetch_attachments(page_url):
 
     content_div = soup.find("div", class_="cPost_contentWrap")
     img_url = None
-
     if content_div:
         img_tag = content_div.find("img")
         if img_tag and img_tag.get("src"):
@@ -150,9 +127,10 @@ async def fetch_attachments(page_url):
     highest_season = 0
     highest_episode_range = (0, 0)
 
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
+    search_scope = content_div if content_div else soup
 
+    for link in search_scope.find_all("a", href=True):
+        href = link["href"]
         if "attachment.php" not in href:
             continue
 
@@ -160,17 +138,24 @@ async def fetch_attachments(page_url):
         if not link_text:
             continue
 
-        size_tag = link.find_next("span", string=re.compile(r"\d+(?:\.\d+)?\s*(?:GB|MB)", re.I))
-        size_text = size_tag.text if size_tag else link_text
-        size_in_bytes = get_size_in_bytes(size_text)
+        size_in_bytes = None
+        for sib in link.find_all_next(string=True, limit=6):
+            if re.search(r"\d+(?:\.\d+)?\s*(?:GB|MB)", str(sib), re.I):
+                size_in_bytes = get_size_in_bytes(str(sib))
+                break
+
+        if not size_in_bytes:
+            size_in_bytes = get_size_in_bytes(link_text)
 
         clean_link_text = tamilmv_domain_regex.sub("", link_text, count=1)
         clean_link_text = re.sub(r"\s*-\s*-\s*", " - ", clean_link_text, count=1).strip()
+        clean_link_text = re.sub(r"^[\s\-_]+", "", clean_link_text).strip()
 
         item = {
             "name": clean_link_text,
-            "link": href,
+            "link": fix_url(href),
             "size_bytes": size_in_bytes,
+            "category": categorize_content(clean_link_text)
         }
 
         # TV Show Season Batch
@@ -178,7 +163,6 @@ async def fetch_attachments(page_url):
         if season_match:
             season_number = int(season_match.group(1))
             episode_range = season_match.group(2)
-
             if "-" in episode_range:
                 episode_start, episode_end = map(int, episode_range.split("-"))
             else:
@@ -198,7 +182,6 @@ async def fetch_attachments(page_url):
         episode_matches = episode_pattern.findall(link_text)
         if episode_matches:
             current_episode_number = max(int(ep) for ep in episode_matches)
-
             if current_episode_number > highest_episode_number:
                 highest_episode_number = current_episode_number
                 highest_episode_links = [item]
@@ -219,6 +202,7 @@ async def fetch_attachments(page_url):
         return None
 
     document = {
+        "page_url": page_url,
         "img_url": img_url,
         "links": final_links,
         "added_on": datetime.utcnow(),
@@ -229,28 +213,23 @@ async def fetch_attachments(page_url):
 
 
 # ============================================================
-# START PROCESSING
+# MAIN LOOP & SERVER
 # ============================================================
 
 async def start_processing():
     main_page_html = await fetch(BASE_URL)
-
     if main_page_html:
         fetched_links = await parse_links(main_page_html)
-
         for li_link in fetched_links:
             logging.info(f"Fetching attachments from {li_link}")
             try:
                 await fetch_attachments(li_link)
             except Exception as e:
                 logging.error(f"Error processing {li_link}: {e}", exc_info=True)
+            await asyncio.sleep(2)
     else:
         logging.warning("No content found on the main page!")
 
-
-# ============================================================
-# WEB ROUTES
-# ============================================================
 
 routes = web.RouteTableDef()
 
@@ -259,19 +238,11 @@ async def root_route_handler(request):
     return web.json_response("MadxBotz")
 
 
-# ============================================================
-# WEB SERVER
-# ============================================================
-
 async def web_server():
     web_app = web.Application(client_max_size=30000000)
     web_app.add_routes(routes)
     return web_app
 
-
-# ============================================================
-# USER CLIENT
-# ============================================================
 
 User = Client(
     "User",
@@ -281,27 +252,19 @@ User = Client(
 )
 
 
-# ============================================================
-# PING SERVER
-# ============================================================
-
 async def ping_server():
     while True:
         try:
             await start_processing()
         except Exception as e:
             logging.error(f"Unexpected error: {e}", exc_info=True)
-
         await asyncio.sleep(60)
 
 
-# ============================================================
-# PING MAIN SERVER
-# ============================================================
-
 async def ping_main_server():
     try:
-        await User.start()
+        if not User.is_connected:
+            await User.start()
         logging.info("User Session started.")
         await User.send_message(GROUP_ID, "User Session Started")
     except Exception as e:
@@ -320,18 +283,11 @@ async def ping_main_server():
             traceback.print_exc()
 
 
-# ============================================================
-# STOP USER
-# ============================================================
-
 async def stop_user():
     try:
-        await User.send_message(GROUP_ID, "User Session Stopped")
-    except Exception as e:
-        logging.warning(f"Could not send stop message: {e}")
-
-    try:
-        await User.stop()
-        logging.info("User Session Stopped")
+        if User.is_connected:
+            await User.send_message(GROUP_ID, "User Session Stopped")
+            await User.stop()
+            logging.info("User Session Stopped")
     except Exception as e:
         logging.error(f"Error stopping User: {e}", exc_info=True)
