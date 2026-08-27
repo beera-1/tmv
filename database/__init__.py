@@ -6,7 +6,6 @@ from datetime import datetime
 from urllib.parse import urlparse, unquote
 
 import cloudscraper
-import requests
 from pyrogram import Client
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -25,7 +24,7 @@ logging.basicConfig(
 
 
 # ============================================================
-# THREADED SCRAPER FOR CLOUDFLARE-BYPASSED REQUESTS
+# CLOUDFLARE SCRAPER
 # ============================================================
 
 scraper = cloudscraper.create_scraper(
@@ -47,13 +46,15 @@ User = Client(
 
 
 # ============================================================
-# ASYNC UTILITIES
+# FETCH
 # ============================================================
 
 async def fetch(url):
+
     loop = asyncio.get_event_loop()
 
     try:
+
         response = await loop.run_in_executor(
             None,
             lambda: scraper.get(
@@ -74,6 +75,7 @@ async def fetch(url):
         return response, size
 
     except Exception as e:
+
         logging.error(
             f"[fetch] Error fetching {url}: {e}",
             exc_info=True
@@ -82,7 +84,12 @@ async def fetch(url):
         return None, 0
 
 
+# ============================================================
+# CHECK LINK
+# ============================================================
+
 async def is_valid_link(url):
+
     response, _ = await fetch(url)
 
     return (
@@ -92,13 +99,24 @@ async def is_valid_link(url):
     )
 
 
-async def download_file(url, local_filename):
+# ============================================================
+# DOWNLOAD FILE
+# ============================================================
+
+async def download_file(
+    url,
+    local_filename
+):
+
     max_retries = 5
 
     for attempt in range(max_retries):
 
         try:
-            response, expected_size = await fetch(url)
+
+            response, expected_size = await fetch(
+                url
+            )
 
             if response:
 
@@ -110,13 +128,14 @@ async def download_file(url, local_filename):
                     for chunk in response.iter_content(
                         chunk_size=8192
                     ):
+
                         f.write(chunk)
 
                 actual_size = os.path.getsize(
                     local_filename
                 )
 
-                # Some servers don't provide Content-Length.
+                # Some servers don't send Content-Length.
                 if (
                     expected_size == 0
                     or actual_size == expected_size
@@ -136,8 +155,13 @@ async def download_file(url, local_filename):
                     f"Retrying..."
                 )
 
-                if os.path.exists(local_filename):
-                    os.remove(local_filename)
+                if os.path.exists(
+                    local_filename
+                ):
+
+                    os.remove(
+                        local_filename
+                    )
 
             else:
 
@@ -169,25 +193,31 @@ async def download_file(url, local_filename):
 # ============================================================
 
 def clean_filename(name):
-    """
-    Cleans the scraped torrent name.
-
-    IMPORTANT:
-    @AddaFileZ prefix is always preserved/added.
-    """
 
     if not name:
         name = "Unknown"
 
-    # Decode URL encoded names.
+    # Decode URL encoded characters.
     name = unquote(
         str(name).strip()
     )
 
-    # Remove unwanted website/domain prefixes ONLY.
-    # @AddaFileZ is NOT removed.
+    # --------------------------------------------------------
+    # DO NOT REMOVE:
+    #
+    # @AddaFileZ
+    # ESub
+    # ESub.mkv
+    # .mkv
+    # .torrent
+    # --------------------------------------------------------
+
+    # Remove ONLY common website prefixes.
     name = re.sub(
-        r"^\s*(?:www\.)?[^-\s]+(?:\.com|\.net|\.in|\.org)[\s-]*",
+        r"^\s*(?:www\.)?"
+        r"[a-zA-Z0-9-]+\."
+        r"(?:com|net|org|in|co|cc|me|tv|to|io|site|online|xyz)"
+        r"(?:\s*[-_:]\s*|\s+)",
         "",
         name,
         flags=re.IGNORECASE
@@ -202,20 +232,29 @@ def clean_filename(name):
 
     name = name.strip()
 
-    # Make sure torrent extension exists.
-    if not name.lower().endswith(".torrent"):
+    # --------------------------------------------------------
+    # KEEP .torrent
+    # --------------------------------------------------------
+
+    if not name.lower().endswith(
+        ".torrent"
+    ):
+
         name += ".torrent"
 
-    # ========================================================
-    # KEEP YOUR OLD PREFIX
-    # ========================================================
+    # --------------------------------------------------------
+    # KEEP @AddaFileZ PREFIX
+    # --------------------------------------------------------
 
     prefix = "@AddaFileZ"
 
     if not name.lower().startswith(
         prefix.lower()
     ):
-        name = f"{prefix} - {name}"
+
+        name = (
+            f"{prefix} - {name}"
+        )
 
     return name
 
@@ -240,7 +279,7 @@ async def send_new_link_notification(links):
         for link in links:
 
             # =================================================
-            # BUILD FINAL TORRENT FILENAME
+            # CREATE FINAL FILENAME
             # =================================================
 
             filename = clean_filename(
@@ -251,6 +290,11 @@ async def send_new_link_notification(links):
                 "downloads",
                 filename
             )
+
+            logging.info(
+                f"📁 Final filename: {filename}"
+            )
+
 
             # =================================================
             # CHECK LINK
@@ -267,14 +311,17 @@ async def send_new_link_notification(links):
 
                 continue
 
+
             # =================================================
-            # DOWNLOAD TORRENT
+            # DOWNLOAD
             # =================================================
 
-            if not await download_file(
+            downloaded = await download_file(
                 link["link"],
                 local_filename
-            ):
+            )
+
+            if not downloaded:
 
                 logging.warning(
                     f"⚠️ Failed to download: "
@@ -283,18 +330,26 @@ async def send_new_link_notification(links):
 
                 continue
 
+
             try:
 
                 # =================================================
-                # SAME STYLE AS YOUR WORKING CODE
+                # USE EXACT FINAL FILENAME
                 #
-                # Caption uses the actual filename.
-                # This preserves @AddaFileZ automatically.
+                # This keeps:
+                # @AddaFileZ
+                # ESub.mkv
+                # .torrent
                 # =================================================
 
                 clean_name = os.path.basename(
                     local_filename
                 )
+
+
+                # =================================================
+                # FINAL CAPTION
+                # =================================================
 
                 caption = (
                     f"<b>{clean_name}"
@@ -305,6 +360,7 @@ async def send_new_link_notification(links):
                     f"</b>"
                 )
 
+
                 # =================================================
                 # SEND TO GROUP
                 # =================================================
@@ -313,8 +369,9 @@ async def send_new_link_notification(links):
                     chat_id=GROUP_ID,
                     document=local_filename,
                     thumb="database/thumb.jpg",
-                    caption=caption,
+                    caption=caption
                 )
+
 
                 # =================================================
                 # TRIGGER COMMAND
@@ -323,8 +380,9 @@ async def send_new_link_notification(links):
                 await User.send_message(
                     chat_id=GROUP_ID,
                     text="/qbleech1",
-                    reply_to_message_id=sent_msg.id,
+                    reply_to_message_id=sent_msg.id
                 )
+
 
                 # =================================================
                 # SEND TO RSS CHAT
@@ -334,12 +392,15 @@ async def send_new_link_notification(links):
                     chat_id=RSS_CHAT,
                     document=local_filename,
                     thumb="database/thumb.jpg",
-                    caption=caption,
+                    caption=caption
                 )
 
+
                 logging.info(
-                    f"✅ Sent: {clean_name}"
+                    f"✅ Sent successfully: "
+                    f"{clean_name}"
                 )
+
 
             except Exception as e:
 
@@ -348,10 +409,11 @@ async def send_new_link_notification(links):
                     exc_info=True
                 )
 
+
             finally:
 
                 # =================================================
-                # DELETE LOCAL TORRENT
+                # DELETE LOCAL FILE
                 # =================================================
 
                 if os.path.exists(
@@ -364,6 +426,11 @@ async def send_new_link_notification(links):
                             local_filename
                         )
 
+                        logging.info(
+                            f"🗑️ Removed: "
+                            f"{local_filename}"
+                        )
+
                     except Exception as e:
 
                         logging.warning(
@@ -373,7 +440,7 @@ async def send_new_link_notification(links):
 
 
 # ============================================================
-# DATABASE CLASS
+# DATABASE
 # ============================================================
 
 class Database:
@@ -443,7 +510,7 @@ class Database:
 
 
     # ========================================================
-    # COUNT ALL LINKS
+    # COUNT LINKS
     # ========================================================
 
     async def count_all_links(self):
@@ -533,8 +600,9 @@ class Database:
                 )
             )
 
+
             # =================================================
-            # CHECK DUPLICATE
+            # DUPLICATE CHECK
             # =================================================
 
             if await self.links_coll.find_one(
@@ -544,6 +612,7 @@ class Database:
             ):
 
                 continue
+
 
             # =================================================
             # STORE DOCUMENT
@@ -560,13 +629,15 @@ class Database:
                 new_doc
             )
 
+
             logging.info(
                 f"[DB] New document inserted: "
                 f"{new_doc['name']}"
             )
 
+
             # =================================================
-            # SEND TELEGRAM NOTIFICATION
+            # SEND TELEGRAM
             # =================================================
 
             await send_new_link_notification(
