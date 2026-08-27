@@ -116,6 +116,7 @@ def get_size_in_bytes(text):
     unit = match.group(2)
 
     if unit == "gb":
+
         return int(
             value * 1024 * 1024 * 1024
         )
@@ -148,6 +149,7 @@ async def parse_links(html):
         if "/index.php?/forums/topic/" in href:
 
             if href not in links:
+
                 links.append(href)
 
             if len(links) == 20:
@@ -201,21 +203,31 @@ async def fetch_attachments(page_url):
     # ========================================================
     # DOMAIN REMOVAL
     #
-    # ONLY removes website/domain text.
-    #
     # IMPORTANT:
-    # .mkv
-    # .torrent
-    # ESub.mkv
-    # @AddaFileZ
     #
-    # ARE NOT REMOVED.
+    # DO NOT use a generic:
+    #
+    # [a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}
+    #
+    # because that treats:
+    #
+    # ESub.mkv
+    # Movie.mkv
+    # Something.mp4
+    #
+    # as domains.
+    #
+    # This regex removes only actual/common website
+    # domain prefixes.
     # ========================================================
 
     domain_removal_regex = re.compile(
         r"\b(?:www\.)?"
-        r"[a-zA-Z0-9.-]+\."
-        r"[a-zA-Z]{2,6}\b"
+        r"[a-zA-Z0-9-]+"
+        r"\."
+        r"(?:com|net|org|in|co|cc|me|tv|to|io|site|online|xyz)"
+        r"\b",
+        re.IGNORECASE
     )
 
 
@@ -303,7 +315,7 @@ async def fetch_attachments(page_url):
 
 
         # ====================================================
-        # FILE SIZE
+        # FIND FILE SIZE
         # ====================================================
 
         size_tag = link.find_next(
@@ -326,20 +338,14 @@ async def fetch_attachments(page_url):
 
 
         # ====================================================
-        # CLEAN DOMAIN ONLY
+        # CLEAN WEBSITE DOMAIN ONLY
         #
-        # DO NOT REMOVE:
+        # IMPORTANT:
         #
-        # @AddaFileZ
-        # ESub.mkv
-        # .mkv
-        # .torrent
-        #
-        # Example stays:
-        #
-        # Pugaippadam [8 x 10 Tasveer] (2009)
-        # Tamil HQ HDRip - x264 - AAC - 350MB
-        # - ESub.mkv.torrent
+        # @AddaFileZ       -> PRESERVED
+        # ESub.mkv         -> PRESERVED
+        # Movie.mkv        -> PRESERVED
+        # .torrent         -> PRESERVED
         # ====================================================
 
         clean_link_text = domain_removal_regex.sub(
