@@ -30,6 +30,7 @@ executor = ThreadPoolExecutor()
 # ============================================================
 
 async def fetch(url):
+
     scraper = cloudscraper.create_scraper()
 
     headers = {
@@ -43,6 +44,7 @@ async def fetch(url):
     loop = asyncio.get_event_loop()
 
     try:
+
         response = await loop.run_in_executor(
             executor,
             lambda: scraper.get(
@@ -62,10 +64,13 @@ async def fetch(url):
             e.response is not None
             and e.response.status_code == 404
         ):
+
             logging.warning(
                 f"Page not found (404): {url}"
             )
+
         else:
+
             logging.error(
                 f"HTTP error fetching {url}: {e}"
             )
@@ -201,32 +206,24 @@ async def fetch_attachments(page_url):
 
 
     # ========================================================
-    # DOMAIN REMOVAL
+    # REMOVE ONLY THIS EXACT PREFIX
     #
-    # IMPORTANT:
+    # www.1TamilMV.ing
     #
-    # DO NOT use a generic:
+    # Nothing else is removed.
     #
-    # [a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}
-    #
-    # because that treats:
+    # This will NOT touch:
     #
     # ESub.mkv
+    # ESub.torrent
     # Movie.mkv
-    # Something.mp4
-    #
-    # as domains.
-    #
-    # This regex removes only actual/common website
-    # domain prefixes.
+    # Movie.torrent
+    # 1080p.mkv
+    # any.other.text
     # ========================================================
 
     domain_removal_regex = re.compile(
-        r"\b(?:www\.)?"
-        r"[a-zA-Z0-9-]+"
-        r"\."
-        r"(?:com|net|org|in|co|cc|me|tv|to|io|site|online|xyz)"
-        r"\b",
+        r"^\s*www\.1TamilMV\.ing\s*[-:]?\s*",
         re.IGNORECASE
     )
 
@@ -297,7 +294,10 @@ async def fetch_attachments(page_url):
 
         href = link["href"]
 
-        # Only process attachment links.
+        # ----------------------------------------------------
+        # ONLY PROCESS ATTACHMENT LINKS
+        # ----------------------------------------------------
+
         if "attachment.php" not in href:
             continue
 
@@ -338,24 +338,23 @@ async def fetch_attachments(page_url):
 
 
         # ====================================================
-        # CLEAN WEBSITE DOMAIN ONLY
+        # REMOVE ONLY www.1TamilMV.ing
         #
-        # IMPORTANT:
-        #
-        # @AddaFileZ       -> PRESERVED
-        # ESub.mkv         -> PRESERVED
-        # Movie.mkv        -> PRESERVED
-        # .torrent         -> PRESERVED
+        # NOTHING ELSE IS CHANGED.
         # ====================================================
 
         clean_link_text = domain_removal_regex.sub(
             "",
-            link_text
+            link_text,
+            count=1
         )
 
-        clean_link_text = clean_link_text.strip(
-            " -_"
-        )
+
+        # ====================================================
+        # ONLY CLEAN LEADING SPACE
+        # ====================================================
+
+        clean_link_text = clean_link_text.lstrip()
 
 
         # ====================================================
@@ -403,9 +402,9 @@ async def fetch_attachments(page_url):
                 )
 
 
-            # ================================================
+            # =================================================
             # NEW HIGHEST SEASON / EPISODE
-            # ================================================
+            # =================================================
 
             if (
                 season_number > highest_season
@@ -430,9 +429,9 @@ async def fetch_attachments(page_url):
                 ]
 
 
-            # ================================================
+            # =================================================
             # SAME SEASON
-            # ================================================
+            # =================================================
 
             elif (
                 season_number == highest_season
@@ -463,9 +462,9 @@ async def fetch_attachments(page_url):
             )
 
 
-            # ================================================
+            # =================================================
             # NEW HIGHEST EPISODE
-            # ================================================
+            # =================================================
 
             if (
                 current_episode_number
@@ -481,9 +480,9 @@ async def fetch_attachments(page_url):
                 ]
 
 
-            # ================================================
+            # =================================================
             # SAME EPISODE
-            # ================================================
+            # =================================================
 
             elif (
                 current_episode_number
