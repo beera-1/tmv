@@ -24,9 +24,8 @@ from database import db
 message_lock = asyncio.Lock()
 executor = ThreadPoolExecutor()
 
-# Regex to match valid content topic URLs (e.g., 199457-anbe-diana-...)
-# Excludes forum pagination links like '183-0/'
-TOPIC_URL_PATTERN = re.compile(r"/index\.php\?/forums/topic/\d+-[a-zA-Z0-9]", re.IGNORECASE)
+# Regex pattern matching valid topic slugs with letters (excludes '183-0/' pagination)
+TOPIC_REGEX = re.compile(r"/index\.php\?/forums/topic/\d+-[a-zA-Z0-9]", re.IGNORECASE)
 
 
 # ============================================================
@@ -48,7 +47,11 @@ async def fetch(url):
     try:
         response = await loop.run_in_executor(
             executor,
-            lambda: scraper.get(url, headers=headers, timeout=30)
+            lambda: scraper.get(
+                url,
+                headers=headers,
+                timeout=30
+            )
         )
         response.raise_for_status()
         return response.text
@@ -103,9 +106,8 @@ async def parse_links(html):
     for link in soup.find_all("a", href=True):
         href = link["href"]
 
-        # Only accept valid thread URLs with content slugs (filters out 183-0 pagination)
-        if TOPIC_URL_PATTERN.search(href):
-            # Clean off trailing URL query parameters or page numbers if necessary
+        # Only capture real content topics, filtering out pagination pages like 183-0/
+        if TOPIC_REGEX.search(href):
             clean_href = href.split("&")[0]
             if clean_href not in links:
                 links.append(clean_href)
@@ -213,12 +215,10 @@ async def fetch_attachments(page_url):
     else:
         final_links = all_qualities
 
-    # Avoid storing empty records if no torrent/attachment was found
     if not final_links:
         return None
 
     document = {
-        "page_url": page_url,
         "img_url": img_url,
         "links": final_links,
         "added_on": datetime.utcnow(),
@@ -249,7 +249,7 @@ async def start_processing():
 
 
 # ============================================================
-# WEB ROUTES & SERVER
+# WEB ROUTES
 # ============================================================
 
 routes = web.RouteTableDef()
@@ -259,6 +259,10 @@ async def root_route_handler(request):
     return web.json_response("MadxBotz")
 
 
+# ============================================================
+# WEB SERVER
+# ============================================================
+
 async def web_server():
     web_app = web.Application(client_max_size=30000000)
     web_app.add_routes(routes)
@@ -266,7 +270,7 @@ async def web_server():
 
 
 # ============================================================
-# USER CLIENT & PING
+# USER CLIENT
 # ============================================================
 
 User = Client(
@@ -277,6 +281,10 @@ User = Client(
 )
 
 
+# ============================================================
+# PING SERVER
+# ============================================================
+
 async def ping_server():
     while True:
         try:
@@ -286,6 +294,10 @@ async def ping_server():
 
         await asyncio.sleep(60)
 
+
+# ============================================================
+# PING MAIN SERVER
+# ============================================================
 
 async def ping_main_server():
     try:
@@ -307,6 +319,10 @@ async def ping_main_server():
         except Exception:
             traceback.print_exc()
 
+
+# ============================================================
+# STOP USER
+# ============================================================
 
 async def stop_user():
     try:
