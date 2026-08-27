@@ -17,10 +17,10 @@ from configs import *
 # ============================================================
 
 os.makedirs("downloads", exist_ok=True)
+logging.basicConfig(level=logging.INFO)
 
-logging.basicConfig(
-    level=logging.INFO
-)
+# Robust path to thumb.jpg located in the same database directory
+THUMB_PATH = os.path.join(os.path.dirname(__file__), "thumb.jpg")
 
 
 # ============================================================
@@ -46,145 +46,52 @@ User = Client(
 
 
 # ============================================================
-# FETCH
-# ============================================================
-
-async def fetch(url):
-
-    loop = asyncio.get_event_loop()
-
-    try:
-
-        response = await loop.run_in_executor(
-            None,
-            lambda: scraper.get(
-                url,
-                timeout=15
-            )
-        )
-
-        response.raise_for_status()
-
-        size = int(
-            response.headers.get(
-                "Content-Length",
-                0
-            )
-        )
-
-        return response, size
-
-    except Exception as e:
-
-        logging.error(
-            f"[fetch] Error fetching {url}: {e}",
-            exc_info=True
-        )
-
-        return None, 0
-
-
-# ============================================================
-# CHECK LINK
-# ============================================================
-
-async def is_valid_link(url):
-
-    response, _ = await fetch(url)
-
-    return (
-        response.status_code == 200
-        if response
-        else False
-    )
-
-
-# ============================================================
 # DOWNLOAD FILE
 # ============================================================
 
-async def download_file(
-    url,
-    local_filename
-):
-
-    max_retries = 5
+async def download_file(url, local_filename):
+    max_retries = 3
+    loop = asyncio.get_event_loop()
 
     for attempt in range(max_retries):
-
         try:
-
-            response, expected_size = await fetch(
-                url
+            response = await loop.run_in_executor(
+                None,
+                lambda: scraper.get(url, stream=True, timeout=30)
             )
 
-            if response:
+            if response and response.status_code == 200:
+                expected_size = int(response.headers.get("Content-Length", 0))
 
-                with open(
-                    local_filename,
-                    "wb"
-                ) as f:
+                with open(local_filename, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
 
-                    for chunk in response.iter_content(
-                        chunk_size=8192
-                    ):
+                actual_size = os.path.getsize(local_filename)
 
-                        f.write(chunk)
-
-                actual_size = os.path.getsize(
-                    local_filename
-                )
-
-                # Some servers don't send Content-Length.
-                if (
-                    expected_size == 0
-                    or actual_size == expected_size
-                ):
-
-                    logging.info(
-                        f"✅ Downloaded "
-                        f"{local_filename} successfully."
-                    )
-
+                if expected_size == 0 or actual_size == expected_size:
+                    logging.info(f"✅ Downloaded {local_filename} successfully ({actual_size} bytes).")
                     return True
 
                 logging.warning(
-                    f"❌ Size mismatch. "
-                    f"Expected: {expected_size}, "
-                    f"Downloaded: {actual_size}. "
-                    f"Retrying..."
+                    f"❌ Size mismatch. Expected: {expected_size}, Downloaded: {actual_size}. Retrying..."
                 )
-
-                if os.path.exists(
-                    local_filename
-                ):
-
-                    os.remove(
-                        local_filename
-                    )
-
+                if os.path.exists(local_filename):
+                    os.remove(local_filename)
             else:
-
-                logging.warning(
-                    f"⚠️ Fetch failed: {url} "
-                    f"(attempt {attempt + 1}/"
-                    f"{max_retries})"
-                )
+                status = response.status_code if response else "No response"
+                logging.warning(f"⚠️ Fetch failed (Status {status}): {url} (attempt {attempt + 1}/{max_retries})")
 
         except Exception as e:
-
-            logging.error(
-                f"[download_file] Error: {e}",
-                exc_info=True
-            )
+            logging.error(f"[download_file] Error: {e}", exc_info=True)
 
         await asyncio.sleep(2)
 
-    logging.error(
-        f"❌ Failed to download {url} "
-        f"after {max_retries} attempts."
-    )
+    if os.path.exists(local_filename):
+        os.remove(local_filename)
 
+    logging.error(f"❌ Failed to download {url} after {max_retries} attempts.")
     return False
 
 
@@ -193,68 +100,30 @@ async def download_file(
 # ============================================================
 
 def clean_filename(name):
-
     if not name:
         name = "Unknown"
 
-    # Decode URL encoded characters.
-    name = unquote(
-        str(name).strip()
-    )
+    name = unquote(str(name).strip())
 
-    # --------------------------------------------------------
-    # DO NOT REMOVE:
-    #
-    # @AddaFileZ
-    # ESub
-    # ESub.mkv
-    # .mkv
-    # .torrent
-    # --------------------------------------------------------
-
-    # Remove ONLY common website prefixes.
+    # Remove unwanted site domain prefixes
     name = re.sub(
-        r"^\s*(?:www\.)?"
-        r"[a-zA-Z0-9-]+\."
-        r"(?:com|net|org|in|co|cc|me|tv|to|io|site|online|xyz)"
-        r"(?:\s*[-_:]\s*|\s+)",
+        r"^\s*(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|in|co|cc|me|tv|to|io|site|online|xyz)(?:\s*[-_:]\s*|\s+)",
         "",
         name,
         flags=re.IGNORECASE
     )
 
-    # Remove invalid filesystem characters.
-    name = re.sub(
-        r'[\\/*?:"<>|]',
-        "_",
-        name
-    )
+    # Sanitize invalid filesystem characters
+    name = re.sub(r'[\\/*?:"<>|]', "_", name).strip()
 
-    name = name.strip()
-
-    # --------------------------------------------------------
-    # KEEP .torrent
-    # --------------------------------------------------------
-
-    if not name.lower().endswith(
-        ".torrent"
-    ):
-
+    # Ensure .torrent suffix
+    if not name.lower().endswith(".torrent"):
         name += ".torrent"
 
-    # --------------------------------------------------------
-    # KEEP @AddaFileZ PREFIX
-    # --------------------------------------------------------
-
+    # Ensure @AddaFileZ prefix
     prefix = "@AddaFileZ"
-
-    if not name.lower().startswith(
-        prefix.lower()
-    ):
-
-        name = (
-            f"{prefix} - {name}"
-        )
+    if not name.lower().startswith(prefix.lower()):
+        name = f"{prefix} - {name}"
 
     return name
 
@@ -264,179 +133,69 @@ def clean_filename(name):
 # ============================================================
 
 async def send_new_link_notification(links):
+    if not User.is_connected:
+        await User.start()
 
-    async with User:
+    if not links:
+        await User.send_message(chat_id=GROUP_ID, text="Empty Array")
+        return
 
-        if not links:
+    for link in links:
+        filename = clean_filename(link.get("name", "file"))
+        local_filename = os.path.join("downloads", filename)
 
-            await User.send_message(
+        logging.info(f"📁 Processing: {filename}")
+
+        downloaded = await download_file(link["link"], local_filename)
+        if not downloaded:
+            continue
+
+        try:
+            clean_name = os.path.basename(local_filename)
+            caption = (
+                f"<b>{clean_name}\n\n"
+                f"#Movies #1TMV\n\n"
+                f"Powered By ✨ @AddaFileZ</b>"
+            )
+
+            thumb = THUMB_PATH if os.path.exists(THUMB_PATH) else None
+
+            # 1. Send file to group
+            sent_msg = await User.send_document(
                 chat_id=GROUP_ID,
-                text="Empty Array"
+                document=local_filename,
+                thumb=thumb,
+                caption=caption
             )
 
-            return
-
-        for link in links:
-
-            # =================================================
-            # CREATE FINAL FILENAME
-            # =================================================
-
-            filename = clean_filename(
-                link["name"]
-            )
-
-            local_filename = os.path.join(
-                "downloads",
-                filename
-            )
-
-            logging.info(
-                f"📁 Final filename: {filename}"
-            )
-
-
-            # =================================================
-            # CHECK LINK
-            # =================================================
-
-            if not await is_valid_link(
-                link["link"]
-            ):
-
-                logging.warning(
-                    f"⚠️ Invalid link skipped: "
-                    f"{link['link']}"
-                )
-
-                continue
-
-
-            # =================================================
-            # DOWNLOAD
-            # =================================================
-
-            downloaded = await download_file(
-                link["link"],
-                local_filename
-            )
-
-            if not downloaded:
-
-                logging.warning(
-                    f"⚠️ Failed to download: "
-                    f"{link['link']}"
-                )
-
-                continue
-
-
-            try:
-
-                # =================================================
-                # USE EXACT FINAL FILENAME
-                #
-                # This keeps:
-                # @AddaFileZ
-                # ESub.mkv
-                # .torrent
-                # =================================================
-
-                clean_name = os.path.basename(
-                    local_filename
-                )
-
-
-                # =================================================
-                # FINAL CAPTION
-                # =================================================
-
-                caption = (
-                    f"<b>{clean_name}"
-                    f"\n\n"
-                    f"#Movies #1TMV"
-                    f"\n\n"
-                    f"Powered By ✨ @AddaFileZ"
-                    f"</b>"
-                )
-
-
-                # =================================================
-                # SEND TO GROUP
-                # =================================================
-
-                sent_msg = await User.send_document(
-                    chat_id=GROUP_ID,
-                    document=local_filename,
-                    thumb="database/thumb.jpg",
-                    caption=caption
-                )
-
-
-                # =================================================
-                # TRIGGER COMMAND
-                # =================================================
-
+            # 2. Trigger leech command in group
+            if sent_msg:
                 await User.send_message(
                     chat_id=GROUP_ID,
                     text="/qbleech1",
                     reply_to_message_id=sent_msg.id
                 )
 
+            # 3. Send file to RSS channel
+            await User.send_document(
+                chat_id=RSS_CHAT,
+                document=local_filename,
+                thumb=thumb,
+                caption=caption
+            )
 
-                # =================================================
-                # SEND TO RSS CHAT
-                # =================================================
+            logging.info(f"✅ Sent successfully: {clean_name}")
 
-                await User.send_document(
-                    chat_id=RSS_CHAT,
-                    document=local_filename,
-                    thumb="database/thumb.jpg",
-                    caption=caption
-                )
+        except Exception as e:
+            logging.error(f"[send_document] Error: {e}", exc_info=True)
 
-
-                logging.info(
-                    f"✅ Sent successfully: "
-                    f"{clean_name}"
-                )
-
-
-            except Exception as e:
-
-                logging.error(
-                    f"[send_document] Error: {e}",
-                    exc_info=True
-                )
-
-
-            finally:
-
-                # =================================================
-                # DELETE LOCAL FILE
-                # =================================================
-
-                if os.path.exists(
-                    local_filename
-                ):
-
-                    try:
-
-                        os.remove(
-                            local_filename
-                        )
-
-                        logging.info(
-                            f"🗑️ Removed: "
-                            f"{local_filename}"
-                        )
-
-                    except Exception as e:
-
-                        logging.warning(
-                            f"Could not remove "
-                            f"{local_filename}: {e}"
-                        )
+        finally:
+            if os.path.exists(local_filename):
+                try:
+                    os.remove(local_filename)
+                    logging.info(f"🗑️ Removed: {local_filename}")
+                except Exception as e:
+                    logging.warning(f"Could not remove {local_filename}: {e}")
 
 
 # ============================================================
@@ -445,178 +204,46 @@ async def send_new_link_notification(links):
 
 class Database:
 
-    def __init__(
-        self,
-        url,
-        db_name
-    ):
-
-        self.db = AsyncIOMotorClient(
-            url
-        )[db_name]
-
+    def __init__(self, url, db_name):
+        self.db = AsyncIOMotorClient(url)[db_name]
         self.users_coll = self.db.users
-
         self.links_coll = self.db.attachments
 
+    async def add_user(self, user_id):
+        if not await self.is_present(user_id):
+            await self.users_coll.insert_one({"id": int(user_id)})
 
-    # ========================================================
-    # ADD USER
-    # ========================================================
-
-    async def add_user(
-        self,
-        user_id
-    ):
-
-        if not await self.is_present(
-            user_id
-        ):
-
-            await self.users_coll.insert_one(
-                {
-                    "id": user_id
-                }
-            )
-
-
-    # ========================================================
-    # CHECK USER
-    # ========================================================
-
-    async def is_present(
-        self,
-        user_id
-    ):
-
-        return bool(
-            await self.users_coll.find_one(
-                {
-                    "id": int(user_id)
-                }
-            )
-        )
-
-
-    # ========================================================
-    # TOTAL USERS
-    # ========================================================
+    async def is_present(self, user_id):
+        return bool(await self.users_coll.find_one({"id": int(user_id)}))
 
     async def total_users(self):
-
-        return await self.users_coll.count_documents(
-            {}
-        )
-
-
-    # ========================================================
-    # COUNT LINKS
-    # ========================================================
+        return await self.users_coll.count_documents({})
 
     async def count_all_links(self):
+        return await self.links_coll.count_documents({})
 
-        return await self.links_coll.count_documents(
-            {}
-        )
-
-
-    # ========================================================
-    # SEARCH MOVIE
-    # ========================================================
-
-    async def search_movie(
-        self,
-        movie_name
-    ):
-
+    async def search_movie(self, movie_name):
         regex_query = {
             "name": {
-                "$regex": re.escape(
-                    movie_name
-                ).replace(
-                    r"\ ",
-                    r".*"
-                ),
+                "$regex": re.escape(movie_name).replace(r"\ ", r".*"),
                 "$options": "i",
             }
         }
+        return await self.links_coll.find(regex_query).to_list(length=None)
 
-        return await self.links_coll.find(
-            regex_query
-        ).to_list(
-            length=None
-        )
+    async def get_last_documents(self, count):
+        return await self.links_coll.find({}).sort("added_on", -1).limit(count).to_list(count)
 
+    async def add_document(self, document):
+        img_url = document.get("img_url")
 
-    # ========================================================
-    # GET LAST DOCUMENTS
-    # ========================================================
+        for link in document.get("links", []):
+            parsed = urlparse(link["link"])
+            link_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
 
-    async def get_last_documents(
-        self,
-        count
-    ):
-
-        return await self.links_coll.find(
-            {}
-        ).sort(
-            "added_on",
-            -1
-        ).limit(
-            count
-        ).to_list(
-            count
-        )
-
-
-    # ========================================================
-    # ADD DOCUMENT
-    # ========================================================
-
-    async def add_document(
-        self,
-        document
-    ):
-
-        img_url = document.get(
-            "img_url"
-        )
-
-        for link in document.get(
-            "links",
-            []
-        ):
-
-            parsed = urlparse(
-                link["link"]
-            )
-
-            link_path = (
-                parsed.path
-                + (
-                    f"?{parsed.query}"
-                    if parsed.query
-                    else ""
-                )
-            )
-
-
-            # =================================================
-            # DUPLICATE CHECK
-            # =================================================
-
-            if await self.links_coll.find_one(
-                {
-                    "link": link_path
-                }
-            ):
-
+            # Prevent duplicate processing
+            if await self.links_coll.find_one({"link": link_path}):
                 continue
-
-
-            # =================================================
-            # STORE DOCUMENT
-            # =================================================
 
             new_doc = {
                 "img_url": img_url,
@@ -625,31 +252,14 @@ class Database:
                 "added_on": datetime.utcnow(),
             }
 
-            await self.links_coll.insert_one(
-                new_doc
-            )
+            await self.links_coll.insert_one(new_doc)
+            logging.info(f"[DB] New document inserted: {new_doc['name']}")
 
-
-            logging.info(
-                f"[DB] New document inserted: "
-                f"{new_doc['name']}"
-            )
-
-
-            # =================================================
-            # SEND TELEGRAM
-            # =================================================
-
-            await send_new_link_notification(
-                [link]
-            )
+            await send_new_link_notification([link])
 
 
 # ============================================================
 # GLOBAL DATABASE INSTANCE
 # ============================================================
 
-db = Database(
-    DATABASE_URL,
-    "MadxBotz_Scrapper"
-)
+db = Database(DATABASE_URL, "MadxBotz_Scrapper")
