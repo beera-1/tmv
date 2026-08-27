@@ -10,7 +10,7 @@ import aiohttp
 from aiohttp import web
 from bs4 import BeautifulSoup
 import cloudscraper
-from pyrogram import Client, enums
+from pyrogram import Client
 import requests
 
 from configs import *
@@ -58,7 +58,10 @@ async def fetch(url):
 
     except requests.exceptions.HTTPError as e:
 
-        if e.response is not None and e.response.status_code == 404:
+        if (
+            e.response is not None
+            and e.response.status_code == 404
+        ):
             logging.warning(
                 f"Page not found (404): {url}"
             )
@@ -113,7 +116,6 @@ def get_size_in_bytes(text):
     unit = match.group(2)
 
     if unit == "gb":
-
         return int(
             value * 1024 * 1024 * 1024
         )
@@ -146,7 +148,6 @@ async def parse_links(html):
         if "/index.php?/forums/topic/" in href:
 
             if href not in links:
-
                 links.append(href)
 
             if len(links) == 20:
@@ -199,6 +200,16 @@ async def fetch_attachments(page_url):
 
     # ========================================================
     # DOMAIN REMOVAL
+    #
+    # ONLY removes website/domain text.
+    #
+    # IMPORTANT:
+    # .mkv
+    # .torrent
+    # ESub.mkv
+    # @AddaFileZ
+    #
+    # ARE NOT REMOVED.
     # ========================================================
 
     domain_removal_regex = re.compile(
@@ -206,15 +217,6 @@ async def fetch_attachments(page_url):
         r"[a-zA-Z0-9.-]+\."
         r"[a-zA-Z]{2,6}\b"
     )
-
-
-    # ========================================================
-    # IMPORTANT:
-    #
-    # DO NOT REMOVE .mkv.torrent HERE.
-    #
-    # Your __init__.py handles the final filename/caption.
-    # ========================================================
 
 
     soup = BeautifulSoup(
@@ -273,7 +275,7 @@ async def fetch_attachments(page_url):
 
 
     # ========================================================
-    # PROCESS ALL ATTACHMENTS
+    # PROCESS ATTACHMENTS
     # ========================================================
 
     for link in soup.find_all(
@@ -283,13 +285,13 @@ async def fetch_attachments(page_url):
 
         href = link["href"]
 
-        # Only torrent attachments
+        # Only process attachment links.
         if "attachment.php" not in href:
             continue
 
 
         # ====================================================
-        # ORIGINAL LINK TEXT
+        # GET ORIGINAL LINK TEXT
         # ====================================================
 
         link_text = link.get_text(
@@ -301,14 +303,13 @@ async def fetch_attachments(page_url):
 
 
         # ====================================================
-        # FIND FILE SIZE
+        # FILE SIZE
         # ====================================================
 
         size_tag = link.find_next(
             "span",
             string=re.compile(
-                r"\d+(?:\.\d+)?\s*"
-                r"(?:GB|MB)",
+                r"\d+(?:\.\d+)?\s*(?:GB|MB)",
                 re.I
             )
         )
@@ -328,9 +329,17 @@ async def fetch_attachments(page_url):
         # CLEAN DOMAIN ONLY
         #
         # DO NOT REMOVE:
+        #
         # @AddaFileZ
+        # ESub.mkv
         # .mkv
         # .torrent
+        #
+        # Example stays:
+        #
+        # Pugaippadam [8 x 10 Tasveer] (2009)
+        # Tamil HQ HDRip - x264 - AAC - 350MB
+        # - ESub.mkv.torrent
         # ====================================================
 
         clean_link_text = domain_removal_regex.sub(
@@ -371,7 +380,6 @@ async def fetch_attachments(page_url):
             episode_range = (
                 season_match.group(2)
             )
-
 
             if "-" in episode_range:
 
@@ -430,7 +438,6 @@ async def fetch_attachments(page_url):
                     item
                 )
 
-
             continue
 
 
@@ -481,7 +488,6 @@ async def fetch_attachments(page_url):
                     item
                 )
 
-
             continue
 
 
@@ -500,21 +506,15 @@ async def fetch_attachments(page_url):
 
     if season_based_links:
 
-        final_links = (
-            season_based_links
-        )
+        final_links = season_based_links
 
     elif highest_episode_links:
 
-        final_links = (
-            highest_episode_links
-        )
+        final_links = highest_episode_links
 
     else:
 
-        final_links = (
-            all_qualities
-        )
+        final_links = all_qualities
 
 
     # ========================================================
@@ -631,7 +631,7 @@ User = Client(
 
 
 # ============================================================
-# PING / SCRAPE LOOP
+# PING SERVER
 # ============================================================
 
 async def ping_server():
@@ -655,7 +655,7 @@ async def ping_server():
 
 
 # ============================================================
-# MAIN SERVER PING
+# PING MAIN SERVER
 # ============================================================
 
 async def ping_main_server():
