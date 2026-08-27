@@ -19,18 +19,8 @@ from configs import *
 os.makedirs("downloads", exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 
-# Robust path to thumb.jpg located in the same database directory
+scraper = cloudscraper.create_scraper(delay=10, browser="chrome")
 THUMB_PATH = os.path.join(os.path.dirname(__file__), "thumb.jpg")
-
-
-# ============================================================
-# CLOUDFLARE SCRAPER
-# ============================================================
-
-scraper = cloudscraper.create_scraper(
-    delay=10,
-    browser="chrome"
-)
 
 
 # ============================================================
@@ -49,49 +39,31 @@ User = Client(
 # DOWNLOAD FILE
 # ============================================================
 
-async def download_file(url, local_filename):
-    max_retries = 3
-    loop = asyncio.get_event_loop()
+def _download_sync(url: str, local_filename: str) -> bool:
+    try:
+        response = scraper.get(url, stream=True, timeout=30)
+        if response.status_code == 200:
+            with open(local_filename, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            return os.path.exists(local_filename) and os.path.getsize(local_filename) > 0
+    except Exception as e:
+        logging.error(f"Download exception for {url}: {e}")
+    return False
 
-    for attempt in range(max_retries):
-        try:
-            response = await loop.run_in_executor(
-                None,
-                lambda: scraper.get(url, stream=True, timeout=30)
-            )
 
-            if response and response.status_code == 200:
-                expected_size = int(response.headers.get("Content-Length", 0))
-
-                with open(local_filename, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-
-                actual_size = os.path.getsize(local_filename)
-
-                if expected_size == 0 or actual_size == expected_size:
-                    logging.info(f"✅ Downloaded {local_filename} successfully ({actual_size} bytes).")
-                    return True
-
-                logging.warning(
-                    f"❌ Size mismatch. Expected: {expected_size}, Downloaded: {actual_size}. Retrying..."
-                )
-                if os.path.exists(local_filename):
-                    os.remove(local_filename)
-            else:
-                status = response.status_code if response else "No response"
-                logging.warning(f"⚠️ Fetch failed (Status {status}): {url} (attempt {attempt + 1}/{max_retries})")
-
-        except Exception as e:
-            logging.error(f"[download_file] Error: {e}", exc_info=True)
-
+async def download_file(url: str, local_filename: str) -> bool:
+    for attempt in range(3):
+        success = await asyncio.to_thread(_download_sync, url, local_filename)
+        if success:
+            logging.info(f"✅ Downloaded {local_filename} successfully.")
+            return True
+        logging.warning(f"⚠️ Fetch failed: {url} (attempt {attempt + 1}/3)")
         await asyncio.sleep(2)
 
     if os.path.exists(local_filename):
         os.remove(local_filename)
-
-    logging.error(f"❌ Failed to download {url} after {max_retries} attempts.")
     return False
 
 
@@ -99,28 +71,28 @@ async def download_file(url, local_filename):
 # CLEAN TORRENT NAME
 # ============================================================
 
-def clean_filename(name):
+def clean_filename(name: str) -> str:
     if not name:
         name = "Unknown"
 
     name = unquote(str(name).strip())
 
-    # Remove unwanted site domain prefixes
+    # Remove site domain patterns
     name = re.sub(
         r"^\s*(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|in|co|cc|me|tv|to|io|site|online|xyz)(?:\s*[-_:]\s*|\s+)",
         "",
         name,
         flags=re.IGNORECASE
     )
+    name = re.sub(r'^\s*(\S*TamilMV\S*[\s-]*)+', '', name, flags=re.I)
+    name = re.sub(r'[\\/*?:"<>|]', "_", name)
 
-    # Sanitize invalid filesystem characters
-    name = re.sub(r'[\\/*?:"<>|]', "_", name).strip()
+    # Strips leading hyphens and spaces to prevent duplicate dashes
+    name = re.sub(r"^[\s\-_]+", "", name).strip()
 
-    # Ensure .torrent suffix
     if not name.lower().endswith(".torrent"):
         name += ".torrent"
 
-    # Ensure @AddaFileZ prefix
     prefix = "@AddaFileZ"
     if not name.lower().startswith(prefix.lower()):
         name = f"{prefix} - {name}"
@@ -137,12 +109,12 @@ async def send_new_link_notification(links):
         await User.start()
 
     if not links:
-        await User.send_message(chat_id=GROUP_ID, text="Empty Array")
         return
 
     for link in links:
         filename = clean_filename(link.get("name", "file"))
         local_filename = os.path.join("downloads", filename)
+        category = link.get("category", "Movies")
 
         logging.info(f"📁 Processing: {filename}")
 
@@ -154,13 +126,13 @@ async def send_new_link_notification(links):
             clean_name = os.path.basename(local_filename)
             caption = (
                 f"<b>{clean_name}\n\n"
-                f"#Movies #1TMV\n\n"
+                f"#{category} #1TMV\n\n"
                 f"Powered By ✨ @AddaFileZ</b>"
             )
 
             thumb = THUMB_PATH if os.path.exists(THUMB_PATH) else None
 
-            # 1. Send file to group
+            # Send document to group
             sent_msg = await User.send_document(
                 chat_id=GROUP_ID,
                 document=local_filename,
@@ -168,7 +140,7 @@ async def send_new_link_notification(links):
                 caption=caption
             )
 
-            # 2. Trigger leech command in group
+            # Trigger leech command
             if sent_msg:
                 await User.send_message(
                     chat_id=GROUP_ID,
@@ -176,13 +148,14 @@ async def send_new_link_notification(links):
                     reply_to_message_id=sent_msg.id
                 )
 
-            # 3. Send file to RSS channel
-            await User.send_document(
-                chat_id=RSS_CHAT,
-                document=local_filename,
-                thumb=thumb,
-                caption=caption
-            )
+            # Send to RSS Channel
+            if "RSS_CHAT" in globals() and RSS_CHAT:
+                await User.send_document(
+                    chat_id=RSS_CHAT,
+                    document=local_filename,
+                    thumb=thumb,
+                    caption=caption
+                )
 
             logging.info(f"✅ Sent successfully: {clean_name}")
 
@@ -241,7 +214,7 @@ class Database:
             parsed = urlparse(link["link"])
             link_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
 
-            # Prevent duplicate processing
+            # Prevent duplicate uploads and database writes
             if await self.links_coll.find_one({"link": link_path}):
                 continue
 
@@ -249,6 +222,7 @@ class Database:
                 "img_url": img_url,
                 "name": link["name"],
                 "link": link_path,
+                "category": link.get("category", "Movies"),
                 "added_on": datetime.utcnow(),
             }
 
