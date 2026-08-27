@@ -206,24 +206,29 @@ async def fetch_attachments(page_url):
 
 
     # ========================================================
-    # REMOVE ONLY THIS EXACT PREFIX
+    # TAMILMV DOMAIN REMOVAL
+    #
+    # REMOVE ONLY:
     #
     # www.1TamilMV.ing
+    # www.1TamilMV.meme
+    # www.1TamilMV.com
+    # www.1TamilMV.net
+    # etc.
     #
-    # Nothing else is removed.
+    # IMPORTANT:
     #
-    # This will NOT touch:
+    # @AddaFileZ       -> PRESERVED
+    # ESub             -> PRESERVED
+    # ESub.mkv         -> PRESERVED
+    # Movie.mkv        -> PRESERVED
+    # .torrent         -> PRESERVED
     #
-    # ESub.mkv
-    # ESub.torrent
-    # Movie.mkv
-    # Movie.torrent
-    # 1080p.mkv
-    # any.other.text
+    # This does NOT use a generic extension regex.
     # ========================================================
 
-    domain_removal_regex = re.compile(
-        r"^\s*www\.1TamilMV\.ing\s*[-:]?\s*",
+    tamilmv_domain_regex = re.compile(
+        r"www\.1TamilMV\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*",
         re.IGNORECASE
     )
 
@@ -338,12 +343,18 @@ async def fetch_attachments(page_url):
 
 
         # ====================================================
-        # REMOVE ONLY www.1TamilMV.ing
+        # REMOVE ONLY www.1TamilMV.DOMAIN
         #
-        # NOTHING ELSE IS CHANGED.
+        # Example:
+        #
+        # @AddaFileZ - www.1TamilMV.meme - Anbe Diana...
+        #
+        # becomes:
+        #
+        # @AddaFileZ - Anbe Diana...
         # ====================================================
 
-        clean_link_text = domain_removal_regex.sub(
+        clean_link_text = tamilmv_domain_regex.sub(
             "",
             link_text,
             count=1
@@ -351,10 +362,20 @@ async def fetch_attachments(page_url):
 
 
         # ====================================================
-        # ONLY CLEAN LEADING SPACE
+        # REMOVE THE SEPARATOR LEFT AFTER DOMAIN
+        #
+        # Only removes the separator immediately following
+        # the removed TamilMV domain.
         # ====================================================
 
-        clean_link_text = clean_link_text.lstrip()
+        clean_link_text = re.sub(
+            r"\s*-\s*-\s*",
+            " - ",
+            clean_link_text,
+            count=1
+        )
+
+        clean_link_text = clean_link_text.strip()
 
 
         # ====================================================
